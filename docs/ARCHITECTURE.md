@@ -28,8 +28,10 @@ Browser
 - Phase 1 does not write memory. Phase 2 will add a Memory Agent after the final
   reviewed response, and only user-confirmed information may become durable.
 - The Phase 2 Memory Agent foundation is feature-flagged off by default. When
-  enabled, it may return a candidate for confirmation but still performs no
-  database write. Memory failure never blocks a reviewed response.
+  enabled, it may return a candidate for confirmation. The browser writes a
+  durable memory only after the authenticated user explicitly accepts that
+  candidate; RLS verifies ownership and confirmed state. Memory failure never
+  blocks a reviewed response.
 - Cloud resources are created only after organization, region, cost, and scope confirmation.
 
 The authoritative architecture and implementation requirements are maintained in:

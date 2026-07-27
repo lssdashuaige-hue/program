@@ -77,9 +77,11 @@ It must distinguish:
 
 The Memory Agent foundation is implemented behind
 `MEMORY_AGENT_ENABLED=false`. It can generate a typed candidate for later user
-confirmation, but it cannot write to Supabase. Durable confirmation remains
-blocked until authenticated user identity and an explicit confirmation endpoint
-are implemented.
+confirmation. The frontend now presents that candidate separately from the
+reviewed response and writes it to Supabase only after an authenticated user
+selects "记住它". Declining or ignoring the candidate performs no write. RLS
+requires the row owner to match the authenticated user and requires durable
+memory rows created through the browser to be explicitly confirmed.
 
 ## Phase 3: Full architecture
 
