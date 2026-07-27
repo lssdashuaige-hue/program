@@ -4,8 +4,10 @@
 Browser
   → Next.js frontend
   → FastAPI API
-     → conversation and safety pipeline
-     → LLM adapter
+     → Reflection Agent
+     → Review Agent
+     → final reviewed response
+     → future Memory Agent hook
      → Supabase PostgreSQL
 ```
 
@@ -13,7 +15,18 @@ Browser
 - Supabase secret or service credentials stay in the backend.
 - Every user-data table in an exposed schema uses row-level security.
 - Memory requires explicit user confirmation before becoming durable.
-- The current `/chat` endpoint is a deterministic scaffold; a versioned model adapter will replace it in a later sprint.
+- The `/chat` endpoint preserves its public response contract while internally
+  running Reflection Agent → Review Agent when `OPENAI_API_KEY` is configured.
+- An unreviewed Reflection Agent draft is never returned if the Review Agent
+  fails. The endpoint returns a temporary service error instead.
+- Without a configured provider API key, the endpoint keeps a deterministic
+  safe scaffold so local development remains usable.
+- The model gateway supports OpenAI Responses API and DeepSeek Chat Completions.
+  `LLM_PROVIDER=auto` selects DeepSeek when only `DEEPSEEK_API_KEY` is present,
+  otherwise OpenAI when only `OPENAI_API_KEY` is present. Explicit provider
+  selection remains available.
+- Phase 1 does not write memory. Phase 2 will add a Memory Agent after the final
+  reviewed response, and only user-confirmed information may become durable.
 - Cloud resources are created only after organization, region, cost, and scope confirmation.
 
 The authoritative architecture and implementation requirements are maintained in:
