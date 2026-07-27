@@ -33,3 +33,8 @@ def reflection_instructions() -> str:
 @lru_cache
 def review_instructions() -> str:
     return "\n\n".join((load_prompt("review.md"), load_prompt("safety.md")))
+
+
+@lru_cache
+def memory_instructions() -> str:
+    return "\n\n".join((load_prompt("memory.md"), load_prompt("safety.md")))

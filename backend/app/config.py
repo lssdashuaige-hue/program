@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     deepseek_review_model: str = "deepseek-v4-pro"
     deepseek_reflection_reasoning_effort: Literal["high", "max"] = "high"
     deepseek_review_reasoning_effort: Literal["high", "max"] = "high"
+    memory_agent_enabled: bool = False
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

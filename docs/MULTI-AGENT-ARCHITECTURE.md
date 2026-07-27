@@ -75,7 +75,11 @@ It must distinguish:
 - a tentative repeated pattern;
 - an AI hypothesis that must not be saved as fact.
 
-No Phase 2 memory write is implemented in Phase 1.
+The Memory Agent foundation is implemented behind
+`MEMORY_AGENT_ENABLED=false`. It can generate a typed candidate for later user
+confirmation, but it cannot write to Supabase. Durable confirmation remains
+blocked until authenticated user identity and an explicit confirmation endpoint
+are implemented.
 
 ## Phase 3: Full architecture
 
