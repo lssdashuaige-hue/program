@@ -1,5 +1,24 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+## PAS authentication
+
+PAS uses Supabase passwordless email login. Configure these local variables:
+
+```env
+NEXT_PUBLIC_SUPABASE_URL=
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=
+NEXT_PUBLIC_API_URL=http://localhost:8000
+```
+
+The Supabase project's allowed redirect URLs must include:
+
+```text
+http://localhost:3000/auth/callback
+http://127.0.0.1:3000/auth/callback
+```
+
+Add the deployed `/auth/callback` URL before testing a hosted environment.
+
 ## Getting Started
 
 First, run the development server:

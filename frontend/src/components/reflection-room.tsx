@@ -1,7 +1,9 @@
 "use client";
 
 import { FormEvent, useState } from "react";
-import { sendReflection } from "@/lib/api";
+import { AuthStatus } from "@/components/auth-status";
+import { MemoryCandidateCard } from "@/components/memory-candidate-card";
+import { type MemoryCandidate, sendReflection } from "@/lib/api";
 
 type Message = { role: "user" | "assistant"; content: string };
 
@@ -15,6 +17,9 @@ export function ReflectionRoom() {
   const [input, setInput] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [memoryCandidate, setMemoryCandidate] =
+    useState<MemoryCandidate | null>(null);
+  const [memoryNotice, setMemoryNotice] = useState<string | null>(null);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -22,11 +27,14 @@ export function ReflectionRoom() {
     if (!message || pending) return;
     setInput("");
     setError(null);
+    setMemoryCandidate(null);
+    setMemoryNotice(null);
     setPending(true);
     setMessages((current) => [...current, { role: "user", content: message }]);
     try {
       const result = await sendReflection(message);
       setMessages((current) => [...current, { role: "assistant", content: result.response }]);
+      setMemoryCandidate(result.memory_candidate ?? null);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "出现了未知错误。");
     } finally {
@@ -41,7 +49,7 @@ export function ReflectionRoom() {
           <p className="mb-2 text-xs font-medium tracking-[0.22em] text-[var(--muted)] uppercase">Reflection room</p>
           <h1 className="text-2xl font-medium tracking-[-0.03em] sm:text-3xl">今天，你想从哪里开始？</h1>
         </div>
-        <span className="rounded-full border border-[var(--line)] px-3 py-1.5 text-xs text-[var(--muted)]">当前不保存记忆</span>
+        <AuthStatus />
       </header>
       <div className="flex flex-1 flex-col gap-4" aria-live="polite">
         {messages.map((message, index) => (
@@ -56,6 +64,22 @@ export function ReflectionRoom() {
         ))}
         {pending && <p className="text-sm text-[var(--muted)]">PAS 正在整理你的表达…</p>}
         {error && <p className="text-sm text-[#9f3a38]">{error}</p>}
+        {memoryCandidate && (
+          <MemoryCandidateCard
+            candidate={memoryCandidate}
+            onDismiss={() => {
+              setMemoryCandidate(null);
+              setMemoryNotice("这条候选记忆没有保存。");
+            }}
+            onSaved={() => {
+              setMemoryCandidate(null);
+              setMemoryNotice("已按你的确认保存。你之后可以查看、修改或删除它。");
+            }}
+          />
+        )}
+        {memoryNotice && (
+          <p className="text-sm text-[var(--muted)]">{memoryNotice}</p>
+        )}
       </div>
       <form className="sticky bottom-4 mt-8 rounded-[1.75rem] border border-[var(--line)] bg-[rgba(250,248,243,0.94)] p-3 shadow-[0_20px_60px_rgba(36,54,52,0.12)] backdrop-blur" onSubmit={handleSubmit}>
         <label className="sr-only" htmlFor="reflection">写下此刻的想法</label>

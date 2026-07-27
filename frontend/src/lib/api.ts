@@ -1,6 +1,14 @@
+export type MemoryCandidate = {
+  kind: "experience" | "reflection" | "pattern" | "need";
+  content: string;
+  confidence: "low" | "medium";
+  confirmation_prompt: string;
+};
+
 export type ChatResponse = {
   response: string;
   mode: string;
+  memory_candidate?: MemoryCandidate;
 };
 
 const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";

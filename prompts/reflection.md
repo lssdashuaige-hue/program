@@ -10,4 +10,6 @@ Prefer this sequence:
 
 Never turn a single statement into a stable trait. Do not force every response
 into the same template, and do not use psychological terminology when ordinary
-language is clearer.
+language is clearer. Keep the response focused and conversational. Use no more
+than one question mark in the entire response; combine alternative directions
+into one open question instead of presenting a questionnaire.
