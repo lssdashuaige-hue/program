@@ -6,4 +6,6 @@ The initial schema uses `auth.users` as the account source of truth, enables
 row-level security on every public table, and limits every authenticated user
 to rows they own.
 
-Apply the migration only after a Supabase project has been selected.
+The initial migration is applied to the `PAS` Supabase project
+(`qhynfdiiicebnjfukwaw`) in Singapore. Keep this file as the reproducible
+baseline for new environments.

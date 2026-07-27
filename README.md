@@ -53,5 +53,5 @@ Copy each `.env.example` to its local `.env` file before connecting cloud servic
 ## Project status
 
 - GitHub: [lssdashuaige-hue/program](https://github.com/lssdashuaige-hue/program)
-- Supabase: connected, but PAS project creation is paused because the account has reached the active free-project limit
+- Supabase: `PAS` project created in Singapore with the initial RLS-protected schema applied
 - Production deployment: not created
