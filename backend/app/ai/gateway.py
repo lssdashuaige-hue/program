@@ -1,15 +1,123 @@
 import json
-from typing import Any, Protocol, TypeVar
+from dataclasses import dataclass
+from typing import Any, Literal, Protocol, TypeVar
 
-from openai import AsyncOpenAI
+from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
 from pydantic import BaseModel, ValidationError
 
 
 StructuredOutput = TypeVar("StructuredOutput", bound=BaseModel)
+PipelineStage = Literal["reflection", "review"]
+GatewayErrorCode = Literal[
+    "provider_authentication",
+    "provider_permission",
+    "provider_rate_limited",
+    "provider_timeout",
+    "provider_connection",
+    "provider_unavailable",
+    "provider_http_error",
+    "empty_content",
+    "invalid_schema",
+    "unexpected_error",
+]
+SafeFinishReason = Literal[
+    "stop",
+    "length",
+    "content_filter",
+    "tool_calls",
+    "insufficient_system_resource",
+    "other",
+]
+
+_SAFE_FINISH_REASONS = {
+    "stop",
+    "length",
+    "content_filter",
+    "tool_calls",
+    "insufficient_system_resource",
+}
 
 
-class ModelOutputError(RuntimeError):
+@dataclass(frozen=True)
+class GatewayDiagnostic:
+    code: GatewayErrorCode
+    http_status: int | None = None
+    finish_reason: SafeFinishReason | None = None
+    content_present: bool = False
+    request_id_present: bool = False
+
+
+class GatewayExecutionError(RuntimeError):
+    def __init__(self, diagnostic: GatewayDiagnostic) -> None:
+        super().__init__(diagnostic.code)
+        self.diagnostic = diagnostic
+
+
+class ModelOutputError(GatewayExecutionError):
     """Raised when a model call does not produce a usable PAS result."""
+
+
+def _safe_finish_reason(value: Any) -> SafeFinishReason | None:
+    if not isinstance(value, str):
+        return None
+    return value if value in _SAFE_FINISH_REASONS else "other"
+
+
+def gateway_error_retryable(code: GatewayErrorCode) -> bool:
+    return code in {
+        "provider_rate_limited",
+        "provider_timeout",
+        "provider_connection",
+        "provider_unavailable",
+        "empty_content",
+    }
+
+
+def diagnostic_from_exception(error: Exception) -> GatewayDiagnostic:
+    if isinstance(error, GatewayExecutionError):
+        return error.diagnostic
+    if isinstance(error, ValidationError):
+        return GatewayDiagnostic(
+            code="invalid_schema",
+            content_present=True,
+        )
+    if isinstance(error, APITimeoutError):
+        return GatewayDiagnostic(code="provider_timeout")
+    if isinstance(error, APIConnectionError):
+        return GatewayDiagnostic(code="provider_connection")
+    if isinstance(error, APIStatusError):
+        status = error.status_code if 400 <= error.status_code <= 599 else None
+        if status == 401:
+            code: GatewayErrorCode = "provider_authentication"
+        elif status == 403:
+            code = "provider_permission"
+        elif status == 408:
+            code = "provider_timeout"
+        elif status == 429:
+            code = "provider_rate_limited"
+        elif status is not None and status >= 500:
+            code = "provider_unavailable"
+        else:
+            code = "provider_http_error"
+        return GatewayDiagnostic(
+            code=code,
+            http_status=status,
+            request_id_present=bool(getattr(error, "request_id", None)),
+        )
+    return GatewayDiagnostic(code="unexpected_error")
+
+
+def _chat_response_parts(response: Any) -> tuple[str | None, SafeFinishReason | None]:
+    choices = getattr(response, "choices", None)
+    if not choices:
+        return None, None
+    choice = choices[0]
+    message = getattr(choice, "message", None)
+    content = getattr(message, "content", None)
+    return (
+        content if isinstance(content, str) else None,
+        _safe_finish_reason(getattr(choice, "finish_reason", None)),
+    )
 
 
 class LanguageModelGateway(Protocol):
@@ -45,17 +153,22 @@ class OpenAIResponsesGateway:
         user_input: str,
         reasoning_effort: str,
     ) -> str:
-        response = await self._client.responses.create(
-            model=model,
-            instructions=instructions,
-            input=user_input,
-            reasoning={"effort": reasoning_effort},
-            store=False,
-            text={"verbosity": "low"},
-        )
-        result = response.output_text.strip()
+        try:
+            response = await self._client.responses.create(
+                model=model,
+                instructions=instructions,
+                input=user_input,
+                reasoning={"effort": reasoning_effort},
+                store=False,
+                text={"verbosity": "low"},
+            )
+        except Exception as error:
+            raise GatewayExecutionError(diagnostic_from_exception(error)) from None
+
+        output_text = getattr(response, "output_text", None)
+        result = output_text.strip() if isinstance(output_text, str) else ""
         if not result:
-            raise ModelOutputError("Reflection Agent returned an empty response.")
+            raise ModelOutputError(GatewayDiagnostic(code="empty_content"))
         return result
 
     async def generate_structured(
@@ -67,17 +180,30 @@ class OpenAIResponsesGateway:
         reasoning_effort: str,
         output_type: type[StructuredOutput],
     ) -> StructuredOutput:
-        response = await self._client.responses.parse(
-            model=model,
-            instructions=instructions,
-            input=user_input,
-            reasoning={"effort": reasoning_effort},
-            store=False,
-            text_format=output_type,
-        )
+        try:
+            response = await self._client.responses.parse(
+                model=model,
+                instructions=instructions,
+                input=user_input,
+                reasoning={"effort": reasoning_effort},
+                store=False,
+                text_format=output_type,
+            )
+        except Exception as error:
+            raise GatewayExecutionError(diagnostic_from_exception(error)) from None
+
         result = response.output_parsed
         if result is None:
-            raise ModelOutputError("Review Agent returned no structured decision.")
+            output_text = getattr(response, "output_text", None)
+            content_present = bool(
+                isinstance(output_text, str) and output_text.strip()
+            )
+            raise ModelOutputError(
+                GatewayDiagnostic(
+                    code="invalid_schema" if content_present else "empty_content",
+                    content_present=content_present,
+                )
+            )
         return result
 
 
@@ -105,19 +231,29 @@ class DeepSeekChatGateway:
         user_input: str,
         reasoning_effort: str,
     ) -> str:
-        response = await self._client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": instructions},
-                {"role": "user", "content": user_input},
-            ],
-            reasoning_effort=self._deepseek_effort(reasoning_effort),
-            extra_body={"thinking": {"type": "enabled"}},
-            max_tokens=1600,
-        )
-        result = response.choices[0].message.content
+        try:
+            response = await self._client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": instructions},
+                    {"role": "user", "content": user_input},
+                ],
+                reasoning_effort=self._deepseek_effort(reasoning_effort),
+                extra_body={"thinking": {"type": "enabled"}},
+                max_tokens=1600,
+            )
+        except Exception as error:
+            raise GatewayExecutionError(diagnostic_from_exception(error)) from None
+
+        result, finish_reason = _chat_response_parts(response)
         if not result or not result.strip():
-            raise ModelOutputError("DeepSeek Reflection Agent returned empty content.")
+            raise ModelOutputError(
+                GatewayDiagnostic(
+                    code="empty_content",
+                    finish_reason=finish_reason,
+                    content_present=False,
+                )
+            )
         return result.strip()
 
     async def generate_structured(
@@ -136,7 +272,7 @@ class DeepSeekChatGateway:
             f"{schema}\n"
             "Do not wrap the JSON in Markdown or add text outside it."
         )
-        last_error: Exception | None = None
+        last_error: ModelOutputError | None = None
 
         for attempt in range(2):
             repair_instruction = (
@@ -144,32 +280,50 @@ class DeepSeekChatGateway:
                 if attempt == 0
                 else "\nThe previous output was empty or invalid. Return complete valid JSON."
             )
-            response = await self._client.chat.completions.create(
-                model=model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": structured_instructions + repair_instruction,
-                    },
-                    {"role": "user", "content": user_input},
-                ],
-                reasoning_effort=self._deepseek_effort(reasoning_effort),
-                extra_body={"thinking": {"type": "enabled"}},
-                response_format={"type": "json_object"},
-                max_tokens=2400,
-            )
-            content = response.choices[0].message.content
+            try:
+                response = await self._client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": structured_instructions + repair_instruction,
+                        },
+                        {"role": "user", "content": user_input},
+                    ],
+                    reasoning_effort=self._deepseek_effort(reasoning_effort),
+                    extra_body={"thinking": {"type": "enabled"}},
+                    response_format={"type": "json_object"},
+                    max_tokens=2400,
+                )
+            except Exception as error:
+                raise GatewayExecutionError(
+                    diagnostic_from_exception(error)
+                ) from None
+
+            content, finish_reason = _chat_response_parts(response)
             if not content or not content.strip():
                 last_error = ModelOutputError(
-                    "DeepSeek Review Agent returned empty JSON."
+                    GatewayDiagnostic(
+                        code="empty_content",
+                        finish_reason=finish_reason,
+                        content_present=False,
+                    )
                 )
                 continue
 
             try:
                 return output_type.model_validate_json(content)
-            except ValidationError as exc:
-                last_error = exc
+            except ValidationError:
+                last_error = ModelOutputError(
+                    GatewayDiagnostic(
+                        code="invalid_schema",
+                        finish_reason=finish_reason,
+                        content_present=True,
+                    )
+                )
 
-        raise ModelOutputError(
-            "DeepSeek Review Agent returned invalid structured output."
-        ) from last_error
+        if last_error is None:
+            last_error = ModelOutputError(
+                GatewayDiagnostic(code="unexpected_error")
+            )
+        raise last_error from None

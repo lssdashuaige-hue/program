@@ -1,3 +1,10 @@
+from dataclasses import dataclass
+
+from app.ai.gateway import (
+    GatewayDiagnostic,
+    PipelineStage,
+    diagnostic_from_exception,
+)
 from app.ai.memory_agent import MemoryAgent
 from app.ai.models import AgentResult
 from app.ai.reflection_agent import ReflectionAgent
@@ -6,6 +13,21 @@ from app.ai.review_agent import ReviewAgent
 
 class AgentPipelineError(RuntimeError):
     """Raised when PAS cannot safely complete the reviewed response pipeline."""
+
+    def __init__(
+        self,
+        *,
+        stage: PipelineStage,
+        diagnostic: GatewayDiagnostic,
+    ) -> None:
+        super().__init__("PAS reviewed pipeline failed.")
+        self.stage = stage
+        self.diagnostic = diagnostic
+
+
+@dataclass
+class PipelineRunState:
+    current_stage: PipelineStage | None = None
 
 
 _MEMORY_OPT_OUT_MARKERS = (
@@ -39,18 +61,43 @@ class MultiAgentOrchestrator:
         self._review_agent = review_agent
         self._memory_agent = memory_agent
 
-    async def respond(self, user_message: str) -> AgentResult:
+    async def respond(
+        self,
+        user_message: str,
+        *,
+        run_state: PipelineRunState | None = None,
+    ) -> AgentResult:
+        if run_state is not None:
+            run_state.current_stage = "reflection"
         try:
             draft = await self._reflection_agent.respond(user_message)
-            decision = await self._review_agent.review(user_message, draft)
-        except Exception as exc:
+        except Exception as error:
             raise AgentPipelineError(
-                "PAS could not complete both required agent stages."
-            ) from exc
+                stage="reflection",
+                diagnostic=diagnostic_from_exception(error),
+            ) from None
+
+        if run_state is not None:
+            run_state.current_stage = "review"
+        try:
+            decision = await self._review_agent.review(user_message, draft)
+        except Exception as error:
+            raise AgentPipelineError(
+                stage="review",
+                diagnostic=diagnostic_from_exception(error),
+            ) from None
+        if run_state is not None:
+            run_state.current_stage = None
 
         final_response = decision.final_response.strip()
         if not final_response:
-            raise AgentPipelineError("Review Agent produced an empty final response.")
+            raise AgentPipelineError(
+                stage="review",
+                diagnostic=GatewayDiagnostic(
+                    code="invalid_schema",
+                    content_present=True,
+                ),
+            ) from None
 
         memory_candidate = None
         if (

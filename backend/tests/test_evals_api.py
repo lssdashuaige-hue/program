@@ -16,7 +16,7 @@ DEEPSEEK_SECRET = "provider-deepseek-secret-value"
 
 
 class StaticOrchestrator:
-    async def respond(self, user_message: str) -> AgentResult:
+    async def respond(self, user_message: str, **kwargs: Any) -> AgentResult:
         final = "我听见你正在整理这段体验。哪部分最需要先看清？"
         review = ReviewDecision(
             approved=True,

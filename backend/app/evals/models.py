@@ -3,6 +3,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.ai.gateway import GatewayErrorCode, PipelineStage, SafeFinishReason
 from app.ai.models import (
     AgentMode,
     MemoryConfidence,
@@ -142,6 +143,18 @@ class EvalAssertionReport(BaseModel):
     detail: str
 
 
+class EvalPipelineFailureReport(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    stage: PipelineStage
+    code: GatewayErrorCode
+    retryable: bool
+    content_present: bool
+    request_id_present: bool
+    http_status: int | None = Field(default=None, ge=400, le=599)
+    finish_reason: SafeFinishReason | None = None
+
+
 class EvalCaseReport(BaseModel):
     case_id: str
     category: str
@@ -158,6 +171,7 @@ class EvalCaseReport(BaseModel):
     passed: bool
     latency_ms: int
     error: EvalErrorCode | None = None
+    pipeline_failure: EvalPipelineFailureReport | None = None
 
 
 class EvalRunReport(BaseModel):

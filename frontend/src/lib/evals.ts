@@ -1,5 +1,57 @@
 import "client-only";
 
+const evalErrorCodes = [
+  "pipeline_failed_closed",
+  "timeout",
+  "internal_error",
+] as const;
+
+const pipelineStages = ["reflection", "review"] as const;
+
+const gatewayErrorCodes = [
+  "provider_authentication",
+  "provider_permission",
+  "provider_rate_limited",
+  "provider_timeout",
+  "provider_connection",
+  "provider_unavailable",
+  "provider_http_error",
+  "empty_content",
+  "invalid_schema",
+  "unexpected_error",
+] as const;
+
+const safeFinishReasons = [
+  "stop",
+  "length",
+  "content_filter",
+  "tool_calls",
+  "insufficient_system_resource",
+  "other",
+] as const;
+
+const pipelineFailureKeys = new Set([
+  "stage",
+  "code",
+  "retryable",
+  "content_present",
+  "request_id_present",
+  "http_status",
+  "finish_reason",
+]);
+
+export type EvalErrorCode = (typeof evalErrorCodes)[number];
+export type EvalPipelineStage = (typeof pipelineStages)[number];
+export type EvalGatewayErrorCode = (typeof gatewayErrorCodes)[number];
+export type EvalFinishReason = (typeof safeFinishReasons)[number];
+
+export class EvalClientError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "EvalClientError";
+  }
+}
+
 export type EvalSuite = {
   name: string;
   description: string;
@@ -22,6 +74,16 @@ export type EvalReview = {
   rationale: string;
 };
 
+export type EvalPipelineFailure = {
+  stage: EvalPipelineStage;
+  code: EvalGatewayErrorCode;
+  retryable: boolean;
+  content_present: boolean;
+  request_id_present: boolean;
+  http_status?: number;
+  finish_reason?: EvalFinishReason;
+};
+
 export type EvalCaseResult = {
   case_id: string;
   category: string;
@@ -37,7 +99,8 @@ export type EvalCaseResult = {
   hard_assertions: EvalAssertion[];
   passed: boolean;
   latency_ms: number;
-  error?: string;
+  error?: EvalErrorCode;
+  pipeline_failure?: EvalPipelineFailure;
 };
 
 export type EvalRunResponse = {
@@ -72,6 +135,71 @@ function asStringArray(value: unknown): string[] {
         return normalized ? [normalized] : [];
       })
     : [];
+}
+
+function isAllowedValue<const Values extends readonly string[]>(
+  value: unknown,
+  allowed: Values,
+): value is Values[number] {
+  return (
+    typeof value === "string" &&
+    (allowed as readonly string[]).includes(value)
+  );
+}
+
+function normalizePipelineFailure(
+  value: unknown,
+  caseIndex: number,
+): EvalPipelineFailure | undefined {
+  if (value === null || value === undefined) return undefined;
+
+  const invalidMessage = `评测服务返回的第 ${caseIndex + 1} 条案例包含无法识别的安全诊断数据。`;
+  if (!isRecord(value)) throw new EvalClientError(invalidMessage);
+
+  if (Object.keys(value).some((key) => !pipelineFailureKeys.has(key))) {
+    throw new EvalClientError(invalidMessage);
+  }
+
+  if (
+    !isAllowedValue(value.stage, pipelineStages) ||
+    !isAllowedValue(value.code, gatewayErrorCodes) ||
+    typeof value.retryable !== "boolean" ||
+    typeof value.content_present !== "boolean" ||
+    typeof value.request_id_present !== "boolean"
+  ) {
+    throw new EvalClientError(invalidMessage);
+  }
+
+  let httpStatus: number | undefined;
+  if (value.http_status !== null && value.http_status !== undefined) {
+    if (
+      typeof value.http_status !== "number" ||
+      !Number.isInteger(value.http_status) ||
+      value.http_status < 400 ||
+      value.http_status > 599
+    ) {
+      throw new EvalClientError(invalidMessage);
+    }
+    httpStatus = value.http_status;
+  }
+
+  let finishReason: EvalFinishReason | undefined;
+  if (value.finish_reason !== null && value.finish_reason !== undefined) {
+    if (!isAllowedValue(value.finish_reason, safeFinishReasons)) {
+      throw new EvalClientError(invalidMessage);
+    }
+    finishReason = value.finish_reason;
+  }
+
+  return {
+    stage: value.stage,
+    code: value.code,
+    retryable: value.retryable,
+    content_present: value.content_present,
+    request_id_present: value.request_id_present,
+    http_status: httpStatus,
+    finish_reason: finishReason,
+  };
 }
 
 function normalizeSuite(value: unknown): EvalSuite | null {
@@ -123,11 +251,22 @@ function normalizeReview(value: unknown): EvalReview | undefined {
 
 function normalizeCaseResult(value: unknown, index: number): EvalCaseResult {
   if (!isRecord(value)) {
-    throw new Error(`评测服务返回的第 ${index + 1} 条案例结果无法识别。`);
+    throw new EvalClientError(
+      `评测服务返回的第 ${index + 1} 条案例结果无法识别。`,
+    );
   }
 
   const supportMode = asString(value.support_mode);
   const memoryConfidence = asString(value.memory_candidate_confidence);
+  let error: EvalErrorCode | undefined;
+  if (value.error !== null && value.error !== undefined) {
+    if (!isAllowedValue(value.error, evalErrorCodes)) {
+      throw new EvalClientError(
+        `评测服务返回的第 ${index + 1} 条案例包含无法识别的错误类别。`,
+      );
+    }
+    error = value.error;
+  }
 
   return {
     case_id: asString(value.case_id) ?? `case-${index + 1}`,
@@ -152,32 +291,23 @@ function normalizeCaseResult(value: unknown, index: number): EvalCaseResult {
       : [],
     passed: value.passed === true,
     latency_ms: asNumber(value.latency_ms) ?? 0,
-    error: asString(value.error),
+    error,
+    pipeline_failure: normalizePipelineFailure(value.pipeline_failure, index),
   };
 }
 
-async function errorForResponse(response: Response): Promise<Error> {
+async function errorForResponse(response: Response): Promise<EvalClientError> {
   if (response.status === 401 || response.status === 403) {
-    return new Error("评测令牌无效，或当前环境不允许访问内部评测。");
+    return new EvalClientError(
+      "评测令牌无效，或当前环境不允许访问内部评测。",
+    );
   }
 
   if (response.status === 404) {
-    return new Error("当前后端尚未启用内部评测接口。");
+    return new EvalClientError("当前后端尚未启用内部评测接口。");
   }
 
-  let detail: string | undefined;
-  try {
-    const payload = (await response.json()) as unknown;
-    if (isRecord(payload)) detail = asString(payload.detail);
-  } catch {
-    // A non-JSON error response is reported using its HTTP status below.
-  }
-
-  return new Error(
-    detail
-      ? `评测请求失败：${detail.slice(0, 300)}`
-      : `评测请求失败（HTTP ${response.status}）。`,
-  );
+  return new EvalClientError(`评测请求失败（HTTP ${response.status}）。`);
 }
 
 export async function fetchEvalSuites(
@@ -198,7 +328,7 @@ export async function fetchEvalSuites(
 
   const payload = (await response.json()) as unknown;
   if (!Array.isArray(payload)) {
-    throw new Error("评测服务返回了无法识别的套件列表。");
+    throw new EvalClientError("评测服务返回了无法识别的套件列表。");
   }
 
   return payload.flatMap((item) => {
@@ -228,7 +358,7 @@ export async function runEvalSuite(
 
   const payload = (await response.json()) as unknown;
   if (!isRecord(payload) || !Array.isArray(payload.cases)) {
-    throw new Error("评测服务返回了无法识别的运行结果。");
+    throw new EvalClientError("评测服务返回了无法识别的运行结果。");
   }
 
   const dataClassification = asString(payload.data_classification);
@@ -243,7 +373,7 @@ export async function runEvalSuite(
     failCount === undefined ||
     durationMs === undefined
   ) {
-    throw new Error("评测服务返回的运行汇总字段不完整。");
+    throw new EvalClientError("评测服务返回的运行汇总字段不完整。");
   }
 
   return {

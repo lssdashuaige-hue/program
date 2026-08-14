@@ -2,7 +2,11 @@
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
+  EvalClientError,
   type EvalCaseResult,
+  type EvalErrorCode,
+  type EvalGatewayErrorCode,
+  type EvalPipelineFailure,
   type EvalRunResponse,
   type EvalSuite,
   fetchEvalSuites,
@@ -15,6 +19,25 @@ type CategorySummary = {
   name: string;
   total: number;
   passed: number;
+};
+
+const errorLabels: Record<EvalErrorCode, string> = {
+  pipeline_failed_closed: "评测管线已安全关闭",
+  timeout: "案例运行超时",
+  internal_error: "内部评测错误",
+};
+
+const gatewayErrorLabels: Record<EvalGatewayErrorCode, string> = {
+  provider_authentication: "服务认证失败",
+  provider_permission: "服务权限不足",
+  provider_rate_limited: "服务触发限流",
+  provider_timeout: "服务响应超时",
+  provider_connection: "服务连接失败",
+  provider_unavailable: "服务暂不可用",
+  provider_http_error: "服务 HTTP 错误",
+  empty_content: "响应内容为空",
+  invalid_schema: "响应结构无效",
+  unexpected_error: "未预期的管线错误",
 };
 
 function formatRate(value: number): string {
@@ -42,6 +65,77 @@ function summarizeCategories(results: EvalCaseResult[]): CategorySummary[] {
 
   return [...categories.values()].sort((left, right) =>
     left.name.localeCompare(right.name, "zh-CN"),
+  );
+}
+
+function PipelineFailureDetails({
+  failure,
+}: {
+  failure: EvalPipelineFailure;
+}) {
+  return (
+    <section className="mt-5 rounded-2xl border border-[#c7aaa4] bg-[#f8efec] px-4 py-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <h3 className="text-sm font-semibold text-[#7a463d]">
+          Pipeline diagnostic
+        </h3>
+        <span className="rounded-full border border-[#c7aaa4] px-2.5 py-1 text-xs font-semibold text-[#7a463d]">
+          内部调试 · 安全白名单
+        </span>
+      </div>
+      <p className="mt-2 text-xs leading-6 text-[#7a463d]">
+        这里只显示固定枚举、布尔值和 HTTP 状态；不会显示原始异常、请求标识值、服务配置或模型思考过程。
+      </p>
+      <dl className="mt-4 grid gap-4 text-sm sm:grid-cols-2 lg:grid-cols-4">
+        <div>
+          <dt className="text-xs font-semibold text-[#7a463d]">失败阶段</dt>
+          <dd className="mt-1 font-semibold">
+            {failure.stage === "reflection" ? "Reflection" : "Review"}
+          </dd>
+        </div>
+        <div>
+          <dt className="text-xs font-semibold text-[#7a463d]">错误类别</dt>
+          <dd className="mt-1 break-words">
+            {gatewayErrorLabels[failure.code]}
+            <span className="mt-1 block font-mono text-xs">{failure.code}</span>
+          </dd>
+        </div>
+        <div>
+          <dt className="text-xs font-semibold text-[#7a463d]">可否重试</dt>
+          <dd className="mt-1">{failure.retryable ? "可以" : "不建议"}</dd>
+        </div>
+        <div>
+          <dt className="text-xs font-semibold text-[#7a463d]">HTTP 状态</dt>
+          <dd className="mt-1">
+            {failure.http_status === undefined
+              ? "未返回"
+              : failure.http_status}
+          </dd>
+        </div>
+        <div>
+          <dt className="text-xs font-semibold text-[#7a463d]">
+            Finish reason
+          </dt>
+          <dd className="mt-1 break-words font-mono text-xs">
+            {failure.finish_reason ?? "未返回"}
+          </dd>
+        </div>
+        <div>
+          <dt className="text-xs font-semibold text-[#7a463d]">内容存在性</dt>
+          <dd className="mt-1">
+            {failure.content_present ? "存在内容" : "没有内容"}
+          </dd>
+        </div>
+        <div>
+          <dt className="text-xs font-semibold text-[#7a463d]">
+            请求标识存在性
+          </dt>
+          <dd className="mt-1">
+            {failure.request_id_present ? "存在（不显示值）" : "不存在"}
+          </dd>
+        </div>
+      </dl>
+    </section>
   );
 }
 
@@ -109,9 +203,16 @@ function CaseResult({ result }: { result: EvalCaseResult }) {
 
         {result.error && (
           <div className="mt-5 rounded-2xl border border-[#c7aaa4] bg-[#f8efec] px-4 py-3 text-sm leading-6 text-[#7a463d]">
-            <p className="font-semibold">案例运行错误</p>
-            <p className="mt-1 break-words">{result.error}</p>
+            <p className="font-semibold">案例错误类别</p>
+            <p className="mt-1 break-words">
+              {errorLabels[result.error]}
+              <span className="ml-2 font-mono text-xs">{result.error}</span>
+            </p>
           </div>
+        )}
+
+        {result.pipeline_failure && (
+          <PipelineFailureDetails failure={result.pipeline_failure} />
         )}
 
         <section className="mt-6">
@@ -294,7 +395,9 @@ export function InternalEvalsDashboard() {
       setSuites(availableSuites);
 
       if (!availableSuites.some((suite) => suite.name === coreSuiteName)) {
-        throw new Error("后端没有返回 pas-core-v0.1 内建评测套件。");
+        throw new EvalClientError(
+          "后端没有返回 pas-core-v0.1 内建评测套件。",
+        );
       }
 
       const result = await runEvalSuite(
@@ -306,7 +409,9 @@ export function InternalEvalsDashboard() {
     } catch (caught) {
       if (caught instanceof Error && caught.name === "AbortError") return;
       setError(
-        caught instanceof Error ? caught.message : "内部评测出现未知错误。",
+        caught instanceof EvalClientError
+          ? caught.message
+          : "内部评测请求失败；原始错误详情未显示。",
       );
     } finally {
       if (controllerRef.current === controller) {

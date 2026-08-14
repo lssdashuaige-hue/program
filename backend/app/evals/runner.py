@@ -2,7 +2,16 @@ import asyncio
 from collections.abc import Sequence
 from time import perf_counter
 
-from app.ai.orchestrator import AgentPipelineError, MultiAgentOrchestrator
+from app.ai.gateway import (
+    GatewayDiagnostic,
+    PipelineStage,
+    gateway_error_retryable,
+)
+from app.ai.orchestrator import (
+    AgentPipelineError,
+    MultiAgentOrchestrator,
+    PipelineRunState,
+)
 from app.evals.assertions import evaluate_failure, evaluate_success
 from app.evals.models import (
     EVAL_CASE_TIMEOUT_SECONDS,
@@ -10,6 +19,7 @@ from app.evals.models import (
     EvalCaseReport,
     EvalCaseSpec,
     EvalErrorCode,
+    EvalPipelineFailureReport,
     EvalReviewReport,
     EvalRunReport,
     SuiteName,
@@ -67,16 +77,34 @@ class EvalRunner:
         semaphore: asyncio.Semaphore,
     ) -> EvalCaseReport:
         started = perf_counter()
+        run_state = PipelineRunState()
         try:
             async with semaphore:
                 result = await asyncio.wait_for(
-                    self._orchestrator.respond(case.input),
+                    self._orchestrator.respond(case.input, run_state=run_state),
                     timeout=self._case_timeout_seconds,
                 )
         except TimeoutError:
-            return self._failure_report(case, started, "timeout")
-        except AgentPipelineError:
-            return self._failure_report(case, started, "pipeline_failed_closed")
+            timeout_diagnostic = (
+                GatewayDiagnostic(code="provider_timeout")
+                if run_state.current_stage is not None
+                else None
+            )
+            return self._failure_report(
+                case,
+                started,
+                "timeout",
+                pipeline_stage=run_state.current_stage,
+                pipeline_diagnostic=timeout_diagnostic,
+            )
+        except AgentPipelineError as pipeline_error:
+            return self._failure_report(
+                case,
+                started,
+                "pipeline_failed_closed",
+                pipeline_stage=pipeline_error.stage,
+                pipeline_diagnostic=pipeline_error.diagnostic,
+            )
         except Exception:
             return self._failure_report(case, started, "internal_error")
 
@@ -114,14 +142,29 @@ class EvalRunner:
         case: EvalCaseSpec,
         started: float,
         error: EvalErrorCode,
+        *,
+        pipeline_stage: PipelineStage | None = None,
+        pipeline_diagnostic: GatewayDiagnostic | None = None,
     ) -> EvalCaseReport:
+        pipeline_failure = None
+        if pipeline_stage is not None and pipeline_diagnostic is not None:
+            pipeline_failure = EvalPipelineFailureReport(
+                stage=pipeline_stage,
+                code=pipeline_diagnostic.code,
+                retryable=gateway_error_retryable(pipeline_diagnostic.code),
+                content_present=pipeline_diagnostic.content_present,
+                request_id_present=pipeline_diagnostic.request_id_present,
+                http_status=pipeline_diagnostic.http_status,
+                finish_reason=pipeline_diagnostic.finish_reason,
+            )
         return EvalCaseReport(
             case_id=case.case_id,
             category=case.category,
             input=case.input,
             review_completed=False,
-            hard_assertions=evaluate_failure(error),
+            hard_assertions=evaluate_failure(error, stage=pipeline_stage),
             passed=False,
             latency_ms=round((perf_counter() - started) * 1000),
             error=error,
+            pipeline_failure=pipeline_failure,
         )

@@ -1,5 +1,6 @@
 import re
 
+from app.ai.gateway import PipelineStage
 from app.ai.models import AgentResult
 from app.evals.models import (
     EvalAssertionReport,
@@ -250,8 +251,15 @@ def evaluate_success(
     return assertions
 
 
-def evaluate_failure(error: EvalErrorCode) -> list[EvalAssertionReport]:
-    review_failed = error == "pipeline_failed_closed"
+def evaluate_failure(
+    error: EvalErrorCode,
+    *,
+    stage: PipelineStage | None = None,
+) -> list[EvalAssertionReport]:
+    review_failed = stage == "review" and error in {
+        "pipeline_failed_closed",
+        "timeout",
+    }
     return [
         _result(
             "review_gate_enforced",
