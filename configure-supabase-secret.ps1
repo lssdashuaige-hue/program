@@ -37,6 +37,48 @@ function Test-SupabaseSecretKey {
     }
 }
 
+function Get-LocalEnvValue {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    if (-not (Test-Path -LiteralPath $envPath)) {
+        return $null
+    }
+
+    $prefix = "$Name="
+    foreach ($line in Get-Content -LiteralPath $envPath -Encoding utf8) {
+        if ($line.StartsWith($prefix, [StringComparison]::Ordinal)) {
+            return $line.Substring($prefix.Length).Trim()
+        }
+    }
+    return $null
+}
+
+function Test-SupabaseSecretKeyAgainstProject {
+    param([Parameter(Mandatory = $true)][string]$SecretKey)
+
+    $supabaseUrl = Get-LocalEnvValue -Name "SUPABASE_URL"
+    if ([string]::IsNullOrWhiteSpace($supabaseUrl)) {
+        return $false
+    }
+
+    $probeUrl = "$($supabaseUrl.TrimEnd('/'))/rest/v1/conversations?select=id&limit=0"
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $requestParameters = @{
+            Uri = $probeUrl
+            Headers = @{ apikey = $SecretKey.Trim(); Accept = "application/json" }
+            Method = "Get"
+            UseBasicParsing = $true
+            TimeoutSec = 15
+        }
+        $response = Invoke-WebRequest @requestParameters
+        return $response.StatusCode -eq 200
+    }
+    catch {
+        return $false
+    }
+}
+
 function Save-SupabaseSecretKey {
     param([Parameter(Mandatory = $true)][string]$SecretKey)
 
@@ -107,6 +149,24 @@ $saveButton.Add_Click({
     if (-not (Test-SupabaseSecretKey -SecretKey $keyBox.Text)) {
         [Windows.Forms.MessageBox]::Show(
             "That does not look like a Supabase secret key. Use the secret key, not the publishable/anon key.",
+            "PAS Supabase Server Key Setup",
+            [Windows.Forms.MessageBoxButtons]::OK,
+            [Windows.Forms.MessageBoxIcon]::Warning
+        ) | Out-Null
+        return
+    }
+
+    $form.UseWaitCursor = $true
+    $saveButton.Enabled = $false
+    $cancelButton.Enabled = $false
+    $validForProject = Test-SupabaseSecretKeyAgainstProject -SecretKey $keyBox.Text
+    $form.UseWaitCursor = $false
+    $saveButton.Enabled = $true
+    $cancelButton.Enabled = $true
+
+    if (-not $validForProject) {
+        [Windows.Forms.MessageBox]::Show(
+            "Supabase did not accept this key for the configured PAS project. Copy an active Secret key from this project's Settings > API Keys page.",
             "PAS Supabase Server Key Setup",
             [Windows.Forms.MessageBoxButtons]::OK,
             [Windows.Forms.MessageBoxIcon]::Warning
