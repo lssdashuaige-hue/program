@@ -5,7 +5,7 @@ import { PageIntro } from "@/components/page-intro";
 
 export const metadata: Metadata = {
   title: "记忆与隐私",
-  description: "了解 PAS 当前的数据边界与尚未开放的控制。",
+  description: "了解 PAS 如何保存探索、候选记忆与当前尚未开放的控制。",
 };
 
 const unavailable = [
@@ -32,9 +32,15 @@ export default function PrivacyPage() {
           </h2>
           <div className="mt-6 grid gap-4 md:grid-cols-3">
             {[
-              ["整段对话", "当前网站尚未提供会话历史保存与读取。"],
+              [
+                "探索会话",
+                "未登录时探索只保留在当前页面；登录后，符合安全保存规则且成功写入的原话与 PAS 最终回应会进入探索历史。",
+              ],
               ["候选记忆", "只有登录并明确点击确认后，候选内容才会提交保存。"],
-              ["不保存的选择", "你可以不登录，也可以对每条候选记忆选择暂不保存。"],
+              [
+                "不保存的选择",
+                "你可以保持未登录状态进行临时探索，也可以对每条候选记忆选择暂不保存。",
+              ],
             ].map(([title, description]) => (
               <article className="quiet-card p-6" key={title}>
                 <p className="status-chip">当前说明</p>
@@ -65,9 +71,9 @@ export default function PrivacyPage() {
         </section>
 
         <aside className="mt-10 rounded-[1.75rem] border border-[#b9c8bd] bg-[var(--surface-quiet)] p-6 sm:p-8">
-          <h2 className="text-xl font-medium">现在不希望保存内容？</h2>
+          <h2 className="text-xl font-medium">现在不希望保存这段探索？</h2>
           <p className="mt-3 max-w-3xl leading-7 text-[var(--muted)]">
-            不要确认候选记忆即可。你仍然可以在不登录的情况下使用反思空间。
+            当前 Alpha 会尝试保存登录后符合规则的探索；支持模式、安全降级回应或写入失败的回合不会进入历史。如果你只想进行一次临时整理，可以在未登录状态使用反思空间；候选记忆无论是否登录，都不会在未经确认时保存。
           </p>
           <div className="mt-5 flex flex-wrap gap-3">
             <Link className="button-primary" href="/explore">返回探索</Link>

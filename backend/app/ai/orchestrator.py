@@ -1,9 +1,16 @@
+import asyncio
+from collections.abc import Sequence
 from dataclasses import dataclass
 
+from app.ai.context import ConversationContextMessage
 from app.ai.gateway import (
     GatewayDiagnostic,
     PipelineStage,
     diagnostic_from_exception,
+)
+from app.ai.limits import (
+    REFLECTION_STAGE_TIMEOUT_SECONDS,
+    REVIEW_STAGE_TIMEOUT_SECONDS,
 )
 from app.ai.memory_agent import MemoryAgent
 from app.ai.models import AgentResult
@@ -57,16 +64,23 @@ class MultiAgentOrchestrator:
         reflection_agent: ReflectionAgent,
         review_agent: ReviewAgent,
         memory_agent: MemoryAgent | None = None,
+        reflection_timeout_seconds: float = REFLECTION_STAGE_TIMEOUT_SECONDS,
+        review_timeout_seconds: float = REVIEW_STAGE_TIMEOUT_SECONDS,
     ) -> None:
+        if reflection_timeout_seconds <= 0 or review_timeout_seconds <= 0:
+            raise ValueError("Pipeline stage timeouts must be positive.")
         self._reflection_agent = reflection_agent
         self._review_agent = review_agent
         self._memory_agent = memory_agent
+        self._reflection_timeout_seconds = reflection_timeout_seconds
+        self._review_timeout_seconds = review_timeout_seconds
 
     async def respond(
         self,
         user_message: str,
         *,
         run_state: PipelineRunState | None = None,
+        conversation_history: Sequence[ConversationContextMessage] = (),
     ) -> AgentResult:
         preflight_result = preflight_safety_result(user_message)
         if preflight_result is not None:
@@ -75,7 +89,18 @@ class MultiAgentOrchestrator:
         if run_state is not None:
             run_state.current_stage = "reflection"
         try:
-            draft = await self._reflection_agent.respond(user_message)
+            reflection_call = (
+                self._reflection_agent.respond(
+                    user_message,
+                    conversation_history=conversation_history,
+                )
+                if conversation_history
+                else self._reflection_agent.respond(user_message)
+            )
+            draft = await asyncio.wait_for(
+                reflection_call,
+                timeout=self._reflection_timeout_seconds,
+            )
         except Exception as error:
             raise AgentPipelineError(
                 stage="reflection",
@@ -85,7 +110,19 @@ class MultiAgentOrchestrator:
         if run_state is not None:
             run_state.current_stage = "review"
         try:
-            decision = await self._review_agent.review(user_message, draft)
+            review_call = (
+                self._review_agent.review(
+                    user_message,
+                    draft,
+                    conversation_history=conversation_history,
+                )
+                if conversation_history
+                else self._review_agent.review(user_message, draft)
+            )
+            decision = await asyncio.wait_for(
+                review_call,
+                timeout=self._review_timeout_seconds,
+            )
         except Exception as error:
             raise AgentPipelineError(
                 stage="review",

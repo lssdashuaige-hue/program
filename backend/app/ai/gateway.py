@@ -81,7 +81,7 @@ def diagnostic_from_exception(error: Exception) -> GatewayDiagnostic:
             code="invalid_schema",
             content_present=True,
         )
-    if isinstance(error, APITimeoutError):
+    if isinstance(error, (APITimeoutError, TimeoutError)):
         return GatewayDiagnostic(code="provider_timeout")
     if isinstance(error, APIConnectionError):
         return GatewayDiagnostic(code="provider_connection")
@@ -217,7 +217,11 @@ class DeepSeekChatGateway:
         base_url: str = "https://api.deepseek.com",
         client: Any | None = None,
     ) -> None:
-        self._client = client or AsyncOpenAI(api_key=api_key, base_url=base_url)
+        self._client = client or AsyncOpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            max_retries=0,
+        )
 
     @staticmethod
     def _deepseek_effort(reasoning_effort: str) -> str:
@@ -238,8 +242,10 @@ class DeepSeekChatGateway:
                     {"role": "system", "content": instructions},
                     {"role": "user", "content": user_input},
                 ],
-                reasoning_effort=self._deepseek_effort(reasoning_effort),
-                extra_body={"thinking": {"type": "enabled"}},
+                # Reflection is an untrusted draft and is never returned before
+                # Review. Non-thinking mode keeps that first stage bounded while
+                # preserving high-effort thinking for the safety-critical Review.
+                extra_body={"thinking": {"type": "disabled"}},
                 max_tokens=1600,
             )
         except Exception as error:

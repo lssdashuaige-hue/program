@@ -1,13 +1,16 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { AuthStatus } from "@/components/auth-status";
 import { MemoryCandidateCard } from "@/components/memory-candidate-card";
 import {
   type MemoryCandidate,
+  type PersistenceResult,
   type SupportMode,
   sendReflection,
 } from "@/lib/api";
+import type { ConversationMessage } from "@/lib/conversation-types";
 
 type Message = {
   id: string;
@@ -18,6 +21,7 @@ type Message = {
 type FailedRequest = {
   messageId: string;
   content: string;
+  clientTurnId: string;
 };
 
 type RequestStatus = "idle" | "sending" | "stopping";
@@ -34,8 +38,44 @@ const startingPrompts = [
   "一段关系让我反复有同样的感受",
 ];
 
-export function ReflectionRoom() {
-  const [messages, setMessages] = useState<Message[]>([opening]);
+type Props = {
+  initialConversation?: {
+    id: string;
+    title: string | null;
+  };
+  initialMessages?: ConversationMessage[];
+};
+
+function titleFromMessage(message: string): string {
+  const normalized = message.replace(/\s+/g, " ").trim();
+  return normalized.length > 36 ? `${normalized.slice(0, 36)}…` : normalized;
+}
+
+function persistenceMessage(persistence: PersistenceResult): string | null {
+  switch (persistence.status) {
+    case "already_saved":
+      return "这次重试已与原来保存的内容对齐，没有重复写入历史。";
+    case "not_saved_support":
+      return "这轮已切换到支持模式，没有写入探索历史，也不会形成候选记忆。";
+    case "not_saved_fallback":
+      return "本次使用了安全降级回应，因此这轮没有写入探索历史。";
+    case "failed":
+      return "PAS 已回应，但这轮没有成功写入历史。当前页面仍保留内容，刷新后可能无法恢复。";
+    default:
+      return null;
+  }
+}
+
+export function ReflectionRoom({
+  initialConversation,
+  initialMessages = [],
+}: Props) {
+  const router = useRouter();
+  const [messages, setMessages] = useState<Message[]>(() =>
+    initialMessages.length
+      ? initialMessages.map(({ id, role, content }) => ({ id, role, content }))
+      : [opening],
+  );
   const [input, setInput] = useState("");
   const [requestStatus, setRequestStatus] = useState<RequestStatus>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -45,6 +85,15 @@ export function ReflectionRoom() {
   const [memoryCandidate, setMemoryCandidate] =
     useState<MemoryCandidate | null>(null);
   const [memoryNotice, setMemoryNotice] = useState<string | null>(null);
+  const [persistenceNotice, setPersistenceNotice] = useState<string | null>(
+    null,
+  );
+  const [conversationId, setConversationId] = useState<string | null>(
+    initialConversation?.id ?? null,
+  );
+  const [conversationTitle, setConversationTitle] = useState(
+    initialConversation?.title?.trim() || null,
+  );
   const abortControllerRef = useRef<AbortController | null>(null);
   const messageIdRef = useRef(1);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
@@ -55,7 +104,11 @@ export function ReflectionRoom() {
     return () => abortControllerRef.current?.abort();
   }, []);
 
-  async function requestReflection(message: string, messageId: string) {
+  async function requestReflection(
+    message: string,
+    messageId: string,
+    clientTurnId: string,
+  ) {
     if (abortControllerRef.current) return;
 
     const controller = new AbortController();
@@ -65,27 +118,65 @@ export function ReflectionRoom() {
     setFailedRequest(null);
     setMemoryCandidate(null);
     setMemoryNotice(null);
+    setPersistenceNotice(null);
     setRequestStatus("sending");
 
     try {
-      const result = await sendReflection(message, controller.signal);
-      const responseId = `assistant-${messageIdRef.current++}`;
+      const result = await sendReflection(message, {
+        clientTurnId,
+        conversationId,
+        signal: controller.signal,
+      });
+      const savedPersistence =
+        result.persistence.status === "saved" ||
+        result.persistence.status === "already_saved"
+          ? result.persistence
+          : null;
+      const responseId = savedPersistence
+        ? savedPersistence.assistant_message_id
+        : `assistant-${messageIdRef.current++}`;
       setMessages((current) => [
         ...current,
         { id: responseId, role: "assistant", content: result.response },
       ]);
       setSupportMode(result.support_mode);
+      setPersistenceNotice(persistenceMessage(result.persistence));
+
+      if (savedPersistence) {
+        const firstSavedTurn = !conversationId;
+        setConversationId(savedPersistence.conversation_id);
+        if (firstSavedTurn) {
+          setConversationTitle(titleFromMessage(message));
+          if (savedPersistence.status === "saved") {
+            setPersistenceNotice(
+              "这段探索已保存。你可以从探索历史回到这里继续。",
+            );
+          }
+          router.replace(`/explore/${savedPersistence.conversation_id}`, {
+            scroll: false,
+          });
+        }
+      }
+
       setMemoryCandidate(
         result.support_mode === "support"
           ? null
-          : (result.memory_candidate ?? null),
+          : result.memory_candidate
+            ? {
+                ...result.memory_candidate,
+                source_message_id:
+                  savedPersistence?.assistant_message_id,
+              }
+            : null,
       );
     } catch (caught) {
       setInput((current) => (current.trim() ? current : message));
-      setFailedRequest({ messageId, content: message });
+      setFailedRequest({ messageId, content: message, clientTurnId });
 
       if (caught instanceof Error && caught.name === "AbortError") {
-        setRequestNotice("已停止这次回应，你的文字已经放回输入框，可以修改或重试。");
+        setRequestNotice(
+          "已停止等待，你的文字已经放回输入框。若服务端此前已完成，使用同一内容重试会恢复已保存的结果。",
+        );
       } else {
         setError(caught instanceof Error ? caught.message : "出现了未知错误。");
       }
@@ -103,16 +194,23 @@ export function ReflectionRoom() {
     if (!message || abortControllerRef.current) return;
 
     const previousRequest = failedRequest;
-    const messageId = previousRequest?.messageId ?? `user-${messageIdRef.current++}`;
+    const retryingSameExpression =
+      previousRequest !== null && previousRequest.content === message;
+    const messageId = retryingSameExpression
+      ? previousRequest.messageId
+      : `user-${messageIdRef.current++}`;
+    const clientTurnId = retryingSameExpression
+      ? previousRequest.clientTurnId
+      : crypto.randomUUID();
     setInput("");
     setMessages((current) =>
-      previousRequest
+      retryingSameExpression
         ? current.map((item) =>
-            item.id === messageId ? { ...item, content: message } : item,
-          )
+              item.id === messageId ? { ...item, content: message } : item,
+            )
         : [...current, { id: messageId, role: "user", content: message }],
     );
-    await requestReflection(message, messageId);
+    await requestReflection(message, messageId, clientTurnId);
   }
 
   async function handleRetry() {
@@ -120,7 +218,11 @@ export function ReflectionRoom() {
 
     const request = failedRequest;
     setInput((current) => (current.trim() === request.content ? "" : current));
-    await requestReflection(request.content, request.messageId);
+    await requestReflection(
+      request.content,
+      request.messageId,
+      request.clientTurnId,
+    );
   }
 
   function handleStop() {
@@ -139,7 +241,11 @@ export function ReflectionRoom() {
       <header className="mb-7 flex items-start justify-between gap-5 border-b border-[var(--line)] pb-6">
         <div>
           <p className="mb-2 text-xs font-medium tracking-[0.22em] text-[var(--muted)] uppercase">Reflection room</p>
-          <h1 className="text-2xl font-medium tracking-[-0.03em] sm:text-3xl">今天，你想从哪里开始？</h1>
+          <h1 className="text-2xl font-medium tracking-[-0.03em] sm:text-3xl">
+            {conversationId
+              ? conversationTitle || "继续这段探索"
+              : "今天，你想从哪里开始？"}
+          </h1>
         </div>
         <AuthStatus />
       </header>
@@ -191,6 +297,11 @@ export function ReflectionRoom() {
         {requestNotice && (
           <p className="text-sm leading-6 text-[var(--muted)]" role="status">
             {requestNotice}
+          </p>
+        )}
+        {persistenceNotice && (
+          <p className="text-sm leading-6 text-[var(--muted)]" role="status">
+            {persistenceNotice}
           </p>
         )}
         {error && (

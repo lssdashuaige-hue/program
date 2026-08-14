@@ -38,7 +38,7 @@ export function AuthStatus() {
         className="rounded-full border border-[var(--line)] px-3 py-1.5 text-xs text-[var(--muted)] hover:text-[var(--ink)]"
         href="/auth?next=/explore"
       >
-        登录后可保存确认内容
+        登录后可保存探索
       </Link>
     );
   }

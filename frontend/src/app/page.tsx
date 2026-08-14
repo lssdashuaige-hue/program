@@ -68,7 +68,7 @@ export default function Home() {
               </Link>
             </div>
             <p className="mt-6 max-w-xl text-sm leading-7 text-[var(--muted)]">
-              无需登录即可开始。当前 Alpha 不保存整段对话；登录后，只有你主动确认的候选记忆会保存。
+              无需登录即可开始。未登录的探索只留在当前页面；登录后，符合安全保存规则且成功写入的回合会进入历史。候选记忆仍需你逐条确认。
             </p>
           </div>
 

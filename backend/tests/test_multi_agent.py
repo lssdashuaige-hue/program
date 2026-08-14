@@ -1,10 +1,12 @@
 import asyncio
+import json
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 
 import app.api.chat as chat_api
+from app.ai.context import ConversationContextMessage
 from app.ai.models import ReviewDecision
 from app.ai.orchestrator import AgentPipelineError, MultiAgentOrchestrator
 from app.ai.reflection_agent import ReflectionAgent
@@ -44,7 +46,34 @@ class HangingOrchestrator:
         raise AssertionError("unreachable")
 
 
-def build_orchestrator(gateway: FakeGateway) -> MultiAgentOrchestrator:
+class DelayedGateway(FakeGateway):
+    def __init__(
+        self,
+        *,
+        reflection_delay: float,
+        review_delay: float,
+        decision: ReviewDecision,
+    ) -> None:
+        super().__init__(decision=decision)
+        self.reflection_delay = reflection_delay
+        self.review_delay = review_delay
+
+    async def generate_text(self, **kwargs: Any) -> str:
+        self.calls.append(("reflection", kwargs))
+        await asyncio.sleep(self.reflection_delay)
+        return self.draft
+
+    async def generate_structured(self, **kwargs: Any) -> ReviewDecision:
+        self.calls.append(("review", kwargs))
+        await asyncio.sleep(self.review_delay)
+        assert self.decision is not None
+        return self.decision
+
+
+def build_orchestrator(
+    gateway: FakeGateway,
+    **timeout_overrides: float,
+) -> MultiAgentOrchestrator:
     return MultiAgentOrchestrator(
         reflection_agent=ReflectionAgent(
             gateway=gateway,
@@ -58,6 +87,7 @@ def build_orchestrator(gateway: FakeGateway) -> MultiAgentOrchestrator:
             instructions="review instructions",
             reasoning_effort="medium",
         ),
+        **timeout_overrides,
     )
 
 
@@ -79,6 +109,49 @@ def test_review_agent_can_approve_draft() -> None:
     assert result.mode == "dual-agent"
     assert result.support_mode == "reflection"
     assert [call[0] for call in gateway.calls] == ["reflection", "review"]
+
+
+def test_reviewed_history_is_passed_to_both_agents_as_bounded_context() -> None:
+    gateway = FakeGateway(
+        draft="我们可以从这次的新变化开始看。",
+        decision=ReviewDecision(
+            approved=True,
+            final_response="这次似乎和上次有一点不同。你最先注意到的变化是什么？",
+            issues=[],
+            risk_level="none",
+            rationale="The response remains tentative and uses the prior turn as context.",
+        ),
+    )
+    history = (
+        ConversationContextMessage(role="user", content="上次我说工作让我很累。"),
+        ConversationContextMessage(
+            role="assistant",
+            content="当时你更想先分辨身体疲惫还是关系压力。",
+        ),
+    )
+
+    result = asyncio.run(
+        build_orchestrator(gateway).respond(
+            "今天情况有一点变化。",
+            conversation_history=history,
+        )
+    )
+
+    reflection_payload = json.loads(gateway.calls[0][1]["user_input"])
+    review_payload = json.loads(gateway.calls[1][1]["user_input"])
+    assert reflection_payload["current_user_message"] == "今天情况有一点变化。"
+    assert reflection_payload["conversation_history"] == [
+        {"role": "user", "content": "上次我说工作让我很累。"},
+        {
+            "role": "assistant",
+            "content": "当时你更想先分辨身体疲惫还是关系压力。",
+        },
+    ]
+    assert review_payload["current_user_message"] == "今天情况有一点变化。"
+    assert review_payload["conversation_history"] == reflection_payload[
+        "conversation_history"
+    ]
+    assert result.response == "这次似乎和上次有一点不同。你最先注意到的变化是什么？"
 
 
 def test_review_agent_can_rewrite_unsafe_draft() -> None:
@@ -106,6 +179,87 @@ def test_unreviewed_draft_is_never_returned() -> None:
         asyncio.run(build_orchestrator(gateway).respond("test"))
 
 
+def test_reflection_and_review_receive_independent_time_budgets() -> None:
+    final = "这是经过独立时间预算审核的回复。"
+    gateway = DelayedGateway(
+        reflection_delay=0.06,
+        review_delay=0.06,
+        decision=ReviewDecision(
+            approved=True,
+            final_response=final,
+            issues=[],
+            risk_level="none",
+            rationale="Safe.",
+        ),
+    )
+
+    result = asyncio.run(
+        build_orchestrator(
+            gateway,
+            reflection_timeout_seconds=0.1,
+            review_timeout_seconds=0.1,
+        ).respond("测试独立阶段预算")
+    )
+
+    assert result.response == final
+    assert [call[0] for call in gateway.calls] == ["reflection", "review"]
+
+
+def test_reflection_stage_timeout_is_reported_and_review_is_not_called() -> None:
+    gateway = DelayedGateway(
+        reflection_delay=0.02,
+        review_delay=0,
+        decision=ReviewDecision(
+            approved=True,
+            final_response="绝不能到达的回复。",
+            issues=[],
+            risk_level="none",
+            rationale="Unreachable.",
+        ),
+    )
+
+    with pytest.raises(AgentPipelineError) as caught:
+        asyncio.run(
+            build_orchestrator(
+                gateway,
+                reflection_timeout_seconds=0.001,
+                review_timeout_seconds=0.03,
+            ).respond("测试 Reflection 超时")
+        )
+
+    assert caught.value.stage == "reflection"
+    assert caught.value.diagnostic.code == "provider_timeout"
+    assert [call[0] for call in gateway.calls] == ["reflection"]
+
+
+def test_review_stage_timeout_fails_closed_without_returning_draft() -> None:
+    gateway = DelayedGateway(
+        reflection_delay=0,
+        review_delay=0.02,
+        decision=ReviewDecision(
+            approved=True,
+            final_response="绝不能到达的回复。",
+            issues=[],
+            risk_level="none",
+            rationale="Unreachable.",
+        ),
+    )
+
+    with pytest.raises(AgentPipelineError) as caught:
+        asyncio.run(
+            build_orchestrator(
+                gateway,
+                reflection_timeout_seconds=0.03,
+                review_timeout_seconds=0.001,
+            ).respond("测试 Review 超时")
+        )
+
+    assert caught.value.stage == "review"
+    assert caught.value.diagnostic.code == "provider_timeout"
+    assert [call[0] for call in gateway.calls] == ["reflection", "review"]
+    assert "draft" not in str(caught.value)
+
+
 def test_chat_endpoint_returns_only_reviewed_response() -> None:
     gateway = FakeGateway(
         draft="未经审核的草稿",
@@ -129,6 +283,8 @@ def test_chat_endpoint_returns_only_reviewed_response() -> None:
         "response": "这是经过审核和改写的探索回应。",
         "mode": "dual-agent",
         "support_mode": "reflection",
+        "response_source": "review",
+        "persistence": {"status": "not_requested"},
     }
     assert "未经审核" not in response.text
 

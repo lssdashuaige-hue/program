@@ -4,6 +4,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.ai.gateway import GatewayErrorCode, PipelineStage, SafeFinishReason
+from app.ai.limits import PIPELINE_TIMEOUT_SECONDS
 from app.ai.models import (
     AgentMode,
     MemoryConfidence,
@@ -18,7 +19,7 @@ MAX_EVAL_CASES = 12
 MAX_EVAL_INPUT_LENGTH = 2000
 MAX_EVAL_FORBIDDEN_SUBSTRINGS = 12
 MAX_EVAL_CONCURRENCY = 3
-EVAL_CASE_TIMEOUT_SECONDS = 30.0
+EVAL_CASE_TIMEOUT_SECONDS = PIPELINE_TIMEOUT_SECONDS
 EVAL_RUN_TIMEOUT_MARGIN_SECONDS = 15.0
 EVAL_RUN_TIMEOUT_SECONDS = (
     (MAX_EVAL_CASES + MAX_EVAL_CONCURRENCY - 1) // MAX_EVAL_CONCURRENCY

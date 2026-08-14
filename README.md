@@ -50,6 +50,17 @@ py -m venv .venv
 
 Copy each `.env.example` to its local `.env` file before connecting cloud services. Never commit real credentials.
 
+For local conversation history, first add the PAS project's Supabase server
+secret by double-clicking `配置Supabase服务端密钥.cmd`. The setup window masks the
+secret and writes it only to the Git-ignored `backend/.env`. Use a Supabase
+**secret** key, never a publishable/anon key, and restart the backend after
+saving it.
+
+Only a normal `review` response in `reflection` mode with `risk_level=none` is
+eligible for history. Safety-guard, elevated-risk support, fallback responses,
+internal drafts, review rationale, and memory-agent internals are never written
+to conversation history.
+
 ## Internal PAS evaluations
 
 The development-only evaluation page is available at `/internal/evals`. It runs

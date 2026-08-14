@@ -29,6 +29,7 @@ export async function saveConfirmedMemory(
     content: candidate.content,
     confidence: candidate.confidence,
     confirmed: true,
+    source_message_id: candidate.source_message_id ?? null,
   });
 
   if (error) {

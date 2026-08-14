@@ -1,8 +1,16 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { safeNextPath } from "@/lib/safe-next-path";
 
-function safeNextPath(value: string | null): string {
-  return value?.startsWith("/") && !value.startsWith("//") ? value : "/explore";
+function privateRedirect(destination: URL): NextResponse {
+  const response = NextResponse.redirect(destination);
+  response.headers.set(
+    "Cache-Control",
+    "private, no-cache, no-store, must-revalidate, max-age=0",
+  );
+  response.headers.set("Expires", "0");
+  response.headers.set("Pragma", "no-cache");
+  return response;
 }
 
 export async function GET(request: Request) {
@@ -15,12 +23,15 @@ export async function GET(request: Request) {
     const { error } = await supabase.auth.exchangeCodeForSession(code);
 
     if (!error) {
-      return NextResponse.redirect(new URL(nextPath, requestUrl.origin));
+      const destination = new URL(nextPath, requestUrl.origin);
+      if (destination.origin === requestUrl.origin) {
+        return privateRedirect(destination);
+      }
     }
   }
 
   const errorUrl = new URL("/auth", requestUrl.origin);
   errorUrl.searchParams.set("error", "callback");
   errorUrl.searchParams.set("next", nextPath);
-  return NextResponse.redirect(errorUrl);
+  return privateRedirect(errorUrl);
 }

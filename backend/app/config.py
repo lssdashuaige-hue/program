@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     frontend_origin: str = "http://localhost:3000"
     supabase_url: str | None = None
     supabase_publishable_key: str | None = None
-    supabase_secret_key: str | None = None
+    supabase_secret_key: SecretStr | None = None
     llm_provider: Literal["auto", "openai", "deepseek"] = "auto"
     openai_api_key: str | None = None
     openai_reflection_model: str = "gpt-5.6-terra"

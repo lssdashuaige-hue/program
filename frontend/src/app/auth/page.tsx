@@ -3,19 +3,16 @@ import Link from "next/link";
 import { EmailSignInForm } from "@/components/email-sign-in-form";
 import { OpenRingMark } from "@/components/open-ring-mark";
 import { SiteHeader } from "@/components/site-header";
+import { safeNextPath } from "@/lib/safe-next-path";
 
 export const metadata: Metadata = {
   title: "登录探索空间",
-  description: "使用一次性邮箱链接登录 PAS，只保存你主动确认的候选记忆。",
+  description: "使用一次性邮箱链接登录 PAS，保存符合安全规则的探索并继续自己的主题。",
 };
 
 type Props = {
   searchParams: Promise<{ error?: string; next?: string }>;
 };
-
-function safeNextPath(value: string | undefined): string {
-  return value?.startsWith("/") && !value.startsWith("//") ? value : "/explore";
-}
 
 export default async function AuthPage({ searchParams }: Props) {
   const params = await searchParams;
@@ -35,7 +32,7 @@ export default async function AuthPage({ searchParams }: Props) {
             登录你的探索空间
           </h1>
           <p className="mt-5 text-base leading-8 text-[var(--muted)] sm:text-lg">
-            登录不是开始探索的前提。只有当你想保存一条自己确认过的候选记忆时，才需要进入私密空间。
+            登录不是开始探索的前提。当你希望保存并继续一段探索，或保留自己确认过的候选记忆时，再进入私密空间。
           </p>
           <ul className="mt-8 space-y-4 text-sm leading-7 text-[var(--muted)]">
             <li className="flex gap-3">
@@ -44,7 +41,7 @@ export default async function AuthPage({ searchParams }: Props) {
             </li>
             <li className="flex gap-3">
               <span aria-hidden="true" className="mt-2 h-2 w-2 shrink-0 rounded-full bg-[var(--sage-deep)]" />
-              候选记忆不会自动保存，需要你明确确认。
+              符合安全保存规则且成功写入的探索会进入历史；候选记忆仍需你逐条明确确认。
             </li>
           </ul>
         </section>
