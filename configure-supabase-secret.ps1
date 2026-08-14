@@ -62,20 +62,31 @@ function Test-SupabaseSecretKeyAgainstProject {
     }
 
     $probeUrl = "$($supabaseUrl.TrimEnd('/'))/rest/v1/conversations?select=id&limit=0"
+    $client = $null
+    $request = $null
+    $response = $null
     try {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        $requestParameters = @{
-            Uri = $probeUrl
-            Headers = @{ apikey = $SecretKey.Trim(); Accept = "application/json" }
-            Method = "Get"
-            UseBasicParsing = $true
-            TimeoutSec = 15
-        }
-        $response = Invoke-WebRequest @requestParameters
-        return $response.StatusCode -eq 200
+        Add-Type -AssemblyName System.Net.Http
+        $client = [Net.Http.HttpClient]::new()
+        $client.Timeout = [TimeSpan]::FromSeconds(15)
+        $request = [Net.Http.HttpRequestMessage]::new(
+            [Net.Http.HttpMethod]::Get,
+            $probeUrl
+        )
+        $request.Headers.TryAddWithoutValidation(
+            "apikey",
+            $SecretKey.Trim()
+        ) | Out-Null
+        $response = $client.SendAsync($request).GetAwaiter().GetResult()
+        return $response.IsSuccessStatusCode
     }
     catch {
         return $false
+    }
+    finally {
+        if ($null -ne $response) { $response.Dispose() }
+        if ($null -ne $request) { $request.Dispose() }
+        if ($null -ne $client) { $client.Dispose() }
     }
 }
 
