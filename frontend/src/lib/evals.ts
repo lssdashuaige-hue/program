@@ -30,6 +30,15 @@ const safeFinishReasons = [
   "other",
 ] as const;
 
+const responseSources = [
+  "review",
+  "safety_guard",
+  "review_safety_envelope",
+  "safe_fallback",
+] as const;
+
+const riskLevels = ["none", "concerning", "urgent"] as const;
+
 const pipelineFailureKeys = new Set([
   "stage",
   "code",
@@ -44,6 +53,8 @@ export type EvalErrorCode = (typeof evalErrorCodes)[number];
 export type EvalPipelineStage = (typeof pipelineStages)[number];
 export type EvalGatewayErrorCode = (typeof gatewayErrorCodes)[number];
 export type EvalFinishReason = (typeof safeFinishReasons)[number];
+export type EvalResponseSource = (typeof responseSources)[number];
+export type EvalRiskLevel = (typeof riskLevels)[number];
 
 export class EvalClientError extends Error {
   constructor(message: string) {
@@ -70,7 +81,7 @@ export type EvalAssertion = {
 export type EvalReview = {
   approved: boolean;
   issues: string[];
-  risk_level: string;
+  risk_level: EvalRiskLevel;
   rationale: string;
 };
 
@@ -92,6 +103,9 @@ export type EvalCaseResult = {
   final_response?: string;
   mode?: string;
   support_mode?: "reflection" | "support";
+  response_source?: EvalResponseSource;
+  risk_level?: EvalRiskLevel;
+  safety_guard_applied: boolean;
   memory_candidate_present: boolean;
   memory_candidate_confidence?: "low" | "medium";
   review_completed: boolean;
@@ -238,13 +252,22 @@ function normalizeAssertion(value: unknown, index: number): EvalAssertion {
   };
 }
 
-function normalizeReview(value: unknown): EvalReview | undefined {
+function normalizeReview(
+  value: unknown,
+  caseIndex: number,
+): EvalReview | undefined {
   if (!isRecord(value)) return undefined;
+
+  if (!isAllowedValue(value.risk_level, riskLevels)) {
+    throw new EvalClientError(
+      `评测服务返回的第 ${caseIndex + 1} 条案例包含无法识别的 Review 风险等级。`,
+    );
+  }
 
   return {
     approved: value.approved === true,
     issues: asStringArray(value.issues),
-    risk_level: asString(value.risk_level) ?? "unknown",
+    risk_level: value.risk_level,
     rationale: asString(value.rationale) ?? "未返回 Review rationale。",
   };
 }
@@ -258,6 +281,22 @@ function normalizeCaseResult(value: unknown, index: number): EvalCaseResult {
 
   const supportMode = asString(value.support_mode);
   const memoryConfidence = asString(value.memory_candidate_confidence);
+  if (typeof value.safety_guard_applied !== "boolean") {
+    throw new EvalClientError(
+      `评测服务返回的第 ${index + 1} 条案例包含无法识别的安全闸门状态。`,
+    );
+  }
+
+  let riskLevel: EvalRiskLevel | undefined;
+  if (value.risk_level !== null && value.risk_level !== undefined) {
+    if (!isAllowedValue(value.risk_level, riskLevels)) {
+      throw new EvalClientError(
+        `评测服务返回的第 ${index + 1} 条案例包含无法识别的规范风险等级。`,
+      );
+    }
+    riskLevel = value.risk_level;
+  }
+
   let error: EvalErrorCode | undefined;
   if (value.error !== null && value.error !== undefined) {
     if (!isAllowedValue(value.error, evalErrorCodes)) {
@@ -266,6 +305,20 @@ function normalizeCaseResult(value: unknown, index: number): EvalCaseResult {
       );
     }
     error = value.error;
+  }
+
+  let responseSource: EvalResponseSource | undefined;
+  if (value.response_source !== null && value.response_source !== undefined) {
+    if (!isAllowedValue(value.response_source, responseSources)) {
+      throw new EvalClientError(
+        `评测服务返回的第 ${index + 1} 条案例包含无法识别的回答路径。`,
+      );
+    }
+    responseSource = value.response_source;
+  } else if (error === undefined) {
+    throw new EvalClientError(
+      `评测服务返回的第 ${index + 1} 条成功案例缺少回答路径。`,
+    );
   }
 
   return {
@@ -279,13 +332,16 @@ function normalizeCaseResult(value: unknown, index: number): EvalCaseResult {
       supportMode === "reflection" || supportMode === "support"
         ? supportMode
         : undefined,
+    response_source: responseSource,
+    risk_level: riskLevel,
+    safety_guard_applied: value.safety_guard_applied,
     memory_candidate_present: value.memory_candidate_present === true,
     memory_candidate_confidence:
       memoryConfidence === "low" || memoryConfidence === "medium"
         ? memoryConfidence
         : undefined,
     review_completed: value.review_completed === true,
-    review: normalizeReview(value.review),
+    review: normalizeReview(value.review, index),
     hard_assertions: Array.isArray(value.hard_assertions)
       ? value.hard_assertions.map(normalizeAssertion)
       : [],

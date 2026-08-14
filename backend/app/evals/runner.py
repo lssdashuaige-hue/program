@@ -33,6 +33,10 @@ def _redact_possible_secret(value: str) -> str:
     return value
 
 
+def _redact_optional(value: str | None) -> str | None:
+    return _redact_possible_secret(value) if value is not None else None
+
+
 class EvalRunner:
     def __init__(
         self,
@@ -109,27 +113,37 @@ class EvalRunner:
             return self._failure_report(case, started, "internal_error")
 
         assertions = evaluate_success(case, result)
+        review_report = None
+        if result.review is not None:
+            review_report = EvalReviewReport(
+                approved=result.review.approved,
+                issues=result.review.issues,
+                risk_level=result.review.risk_level,
+                rationale=_redact_possible_secret(result.review.rationale),
+            )
         return EvalCaseReport(
             case_id=case.case_id,
             category=case.category,
             input=case.input,
-            reflection_draft=_redact_possible_secret(result.reflection_draft),
+            reflection_draft=_redact_optional(result.reflection_draft),
             final_response=_redact_possible_secret(result.response),
             mode=result.mode,
             support_mode=result.support_mode,
+            response_source=result.response_source,
+            risk_level=result.risk_level,
+            safety_guard_applied=result.response_source in {
+                "safety_guard",
+                "review_safety_envelope",
+                "safe_fallback",
+            },
             memory_candidate_present=result.memory_candidate is not None,
             memory_candidate_confidence=(
                 result.memory_candidate.confidence
                 if result.memory_candidate is not None
                 else None
             ),
-            review_completed=True,
-            review=EvalReviewReport(
-                approved=result.review.approved,
-                issues=result.review.issues,
-                risk_level=result.review.risk_level,
-                rationale=_redact_possible_secret(result.review.rationale),
-            ),
+            review_completed=result.review is not None,
+            review=review_report,
             hard_assertions=assertions,
             passed=all(
                 assertion.passed for assertion in assertions if assertion.applicable

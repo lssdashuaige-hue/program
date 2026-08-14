@@ -1,3 +1,4 @@
+import asyncio
 from functools import lru_cache
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -14,9 +15,11 @@ from app.ai.prompts import (
 )
 from app.ai.reflection_agent import ReflectionAgent
 from app.ai.review_agent import ReviewAgent
+from app.ai.safety import preflight_safety_result, safe_fallback_result
 from app.config import get_settings
 
 router = APIRouter(prefix="/chat", tags=["reflection"])
+CHAT_TIMEOUT_SECONDS = 30.0
 
 
 class ChatRequest(BaseModel):
@@ -95,18 +98,25 @@ async def chat(
     orchestrator: MultiAgentOrchestrator | None = Depends(get_orchestrator),
 ) -> ChatResponse:
     if orchestrator is None:
+        safety_result = preflight_safety_result(request.message)
+        if safety_result is not None:
+            return ChatResponse(
+                response=safety_result.response,
+                mode=safety_result.mode,
+                support_mode=safety_result.support_mode,
+            )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="PAS 的 AI 与安全审核尚未配置，当前无法开始探索。",
         )
 
     try:
-        result = await orchestrator.respond(request.message)
-    except AgentPipelineError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="PAS 暂时无法完成安全审核，请稍后再试。",
-        ) from exc
+        result = await asyncio.wait_for(
+            orchestrator.respond(request.message),
+            timeout=CHAT_TIMEOUT_SECONDS,
+        )
+    except (AgentPipelineError, TimeoutError):
+        result = safe_fallback_result(request.message)
 
     return ChatResponse(
         response=result.response,

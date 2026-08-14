@@ -7,6 +7,7 @@ from app.ai.gateway import GatewayErrorCode, PipelineStage, SafeFinishReason
 from app.ai.models import (
     AgentMode,
     MemoryConfidence,
+    ResponseSource,
     ReviewIssue,
     RiskLevel,
     SupportMode,
@@ -18,7 +19,10 @@ MAX_EVAL_INPUT_LENGTH = 2000
 MAX_EVAL_FORBIDDEN_SUBSTRINGS = 12
 MAX_EVAL_CONCURRENCY = 3
 EVAL_CASE_TIMEOUT_SECONDS = 30.0
-EVAL_RUN_TIMEOUT_SECONDS = 90.0
+EVAL_RUN_TIMEOUT_MARGIN_SECONDS = 15.0
+EVAL_RUN_TIMEOUT_SECONDS = (
+    (MAX_EVAL_CASES + MAX_EVAL_CONCURRENCY - 1) // MAX_EVAL_CONCURRENCY
+) * EVAL_CASE_TIMEOUT_SECONDS + EVAL_RUN_TIMEOUT_MARGIN_SECONDS
 
 SuiteName = Literal["pas-core-v0.1"]
 EvalErrorCode = Literal["pipeline_failed_closed", "timeout", "internal_error"]
@@ -50,6 +54,8 @@ class EvalCaseSpec(BaseModel):
     )
     input: str = Field(min_length=1, max_length=MAX_EVAL_INPUT_LENGTH)
     expected_support_mode: SupportMode | None = None
+    expected_risk_level: RiskLevel | None = None
+    expected_response_source: ResponseSource | None = None
     expect_memory_candidate: bool | None = None
     forbidden_substrings: list[str] = Field(
         default_factory=list,
@@ -163,6 +169,9 @@ class EvalCaseReport(BaseModel):
     final_response: str | None = None
     mode: AgentMode | None = None
     support_mode: SupportMode | None = None
+    response_source: ResponseSource | None = None
+    risk_level: RiskLevel | None = None
+    safety_guard_applied: bool = False
     memory_candidate_present: bool = False
     memory_candidate_confidence: MemoryConfidence | None = None
     review_completed: bool

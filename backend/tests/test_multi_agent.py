@@ -4,6 +4,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+import app.api.chat as chat_api
 from app.ai.models import ReviewDecision
 from app.ai.orchestrator import AgentPipelineError, MultiAgentOrchestrator
 from app.ai.reflection_agent import ReflectionAgent
@@ -35,6 +36,12 @@ class FakeGateway:
             raise RuntimeError("review unavailable")
         assert self.decision is not None
         return self.decision
+
+
+class HangingOrchestrator:
+    async def respond(self, user_message: str) -> Any:
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
 
 
 def build_orchestrator(gateway: FakeGateway) -> MultiAgentOrchestrator:
@@ -126,7 +133,7 @@ def test_chat_endpoint_returns_only_reviewed_response() -> None:
     assert "未经审核" not in response.text
 
 
-def test_chat_endpoint_fails_closed_when_review_is_unavailable() -> None:
+def test_chat_endpoint_returns_fixed_fallback_when_review_is_unavailable() -> None:
     gateway = FakeGateway(draft="绝不能返回的草稿", fail_review=True)
     app.dependency_overrides[get_orchestrator] = lambda: build_orchestrator(gateway)
 
@@ -135,8 +142,10 @@ def test_chat_endpoint_fails_closed_when_review_is_unavailable() -> None:
     finally:
         app.dependency_overrides.clear()
 
-    assert response.status_code == 503
-    assert response.json()["detail"] == "PAS 暂时无法完成安全审核，请稍后再试。"
+    assert response.status_code == 200
+    assert response.json()["mode"] == "safety-guard"
+    assert response.json()["support_mode"] == "support"
+    assert "不会返回未经审核的内容" in response.json()["response"]
     assert "绝不能返回的草稿" not in response.text
 
 
@@ -153,3 +162,43 @@ def test_chat_endpoint_is_unavailable_without_review_pipeline() -> None:
         "PAS 的 AI 与安全审核尚未配置，当前无法开始探索。"
     )
     assert "response" not in response.json()
+
+
+def test_chat_endpoint_allows_preflight_safety_without_provider() -> None:
+    app.dependency_overrides[get_orchestrator] = lambda: None
+
+    try:
+        response = TestClient(app).post(
+            "/chat",
+            json={
+                "message": "我现在已经想好了今晚结束生命的方法，而且一个人待着。"
+            },
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()["mode"] == "safety-guard"
+    assert response.json()["support_mode"] == "support"
+    assert "立即处理的紧急自伤危险" in response.json()["response"]
+    assert "memory_candidate" not in response.json()
+
+
+def test_chat_timeout_returns_fixed_fallback_without_unreviewed_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app.dependency_overrides[get_orchestrator] = lambda: HangingOrchestrator()
+    monkeypatch.setattr(chat_api, "CHAT_TIMEOUT_SECONDS", 0.001)
+
+    try:
+        response = TestClient(app).post(
+            "/chat",
+            json={"message": "我只是想整理一下今天发生的事情。"},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()["mode"] == "safety-guard"
+    assert response.json()["support_mode"] == "support"
+    assert "不会返回未经审核的内容" in response.json()["response"]

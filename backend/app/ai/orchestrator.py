@@ -9,6 +9,7 @@ from app.ai.memory_agent import MemoryAgent
 from app.ai.models import AgentResult
 from app.ai.reflection_agent import ReflectionAgent
 from app.ai.review_agent import ReviewAgent
+from app.ai.safety import preflight_safety_result, review_safety_envelope_result
 
 
 class AgentPipelineError(RuntimeError):
@@ -67,6 +68,10 @@ class MultiAgentOrchestrator:
         *,
         run_state: PipelineRunState | None = None,
     ) -> AgentResult:
+        preflight_result = preflight_safety_result(user_message)
+        if preflight_result is not None:
+            return preflight_result
+
         if run_state is not None:
             run_state.current_stage = "reflection"
         try:
@@ -88,6 +93,13 @@ class MultiAgentOrchestrator:
             ) from None
         if run_state is not None:
             run_state.current_stage = None
+
+        if decision.risk_level in {"concerning", "urgent"}:
+            return review_safety_envelope_result(
+                user_message=user_message,
+                reflection_draft=draft,
+                review=decision,
+            )
 
         final_response = decision.final_response.strip()
         if not final_response:
@@ -119,10 +131,10 @@ class MultiAgentOrchestrator:
         return AgentResult(
             response=final_response,
             mode="multi-agent" if self._memory_agent is not None else "dual-agent",
-            support_mode=(
-                "reflection" if decision.risk_level == "none" else "support"
-            ),
+            support_mode="reflection",
             memory_candidate=memory_candidate,
+            response_source="review",
+            risk_level=decision.risk_level,
             reflection_draft=draft,
             review=decision,
         )

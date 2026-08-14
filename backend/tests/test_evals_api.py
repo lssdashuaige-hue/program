@@ -6,7 +6,13 @@ from fastapi.testclient import TestClient
 from app.ai.models import AgentResult, ReviewDecision
 from app.api.chat import get_orchestrator
 from app.config import Settings, get_settings
-from app.evals.models import MAX_EVAL_CASES, MAX_EVAL_INPUT_LENGTH
+from app.evals.models import (
+    EVAL_CASE_TIMEOUT_SECONDS,
+    EVAL_RUN_TIMEOUT_MARGIN_SECONDS,
+    MAX_EVAL_CASES,
+    MAX_EVAL_CONCURRENCY,
+    MAX_EVAL_INPUT_LENGTH,
+)
 from app.main import app
 
 
@@ -98,6 +104,10 @@ def test_health_and_suite_metadata_are_protected_and_read_only() -> None:
     assert health.status_code == 200
     assert health.json()["provider_ready"] is True
     assert health.json()["limits"]["max_cases"] == MAX_EVAL_CASES
+    required_run_budget = (
+        (MAX_EVAL_CASES + MAX_EVAL_CONCURRENCY - 1) // MAX_EVAL_CONCURRENCY
+    ) * EVAL_CASE_TIMEOUT_SECONDS + EVAL_RUN_TIMEOUT_MARGIN_SECONDS
+    assert health.json()["limits"]["run_timeout_seconds"] >= required_run_budget
     assert suites.status_code == 200
     assert suites.json()[0]["name"] == "pas-core-v0.1"
     assert suites.json()[0]["case_count"] == MAX_EVAL_CASES
@@ -226,6 +236,9 @@ def test_run_report_contains_auditable_fields_but_no_secrets() -> None:
     assert case["final_response"]
     assert case["mode"] == "dual-agent"
     assert case["support_mode"] == "reflection"
+    assert case["response_source"] == "review"
+    assert case["risk_level"] == "none"
+    assert case["safety_guard_applied"] is False
     assert case["memory_candidate_present"] is False
     assert case["review_completed"] is True
     assert case["review"]["rationale"] == "Safe synthetic fixture."

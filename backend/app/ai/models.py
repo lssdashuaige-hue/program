@@ -16,7 +16,13 @@ ReviewIssue = Literal[
 ]
 
 RiskLevel = Literal["none", "concerning", "urgent"]
-AgentMode = Literal["dual-agent", "multi-agent"]
+AgentMode = Literal["dual-agent", "multi-agent", "safety-guard"]
+ResponseSource = Literal[
+    "review",
+    "safety_guard",
+    "review_safety_envelope",
+    "safe_fallback",
+]
 SupportMode = Literal["reflection", "support"]
 MemoryKind = Literal["experience", "reflection", "pattern", "need"]
 MemoryConfidence = Literal["low", "medium"]
@@ -77,9 +83,71 @@ class MemoryDecision(BaseModel):
 
 
 class AgentResult(BaseModel):
-    response: str
+    response: str = Field(min_length=1, max_length=12000)
     mode: AgentMode = "dual-agent"
     support_mode: SupportMode
     memory_candidate: MemoryCandidate | None = None
-    reflection_draft: str = Field(exclude=True)
-    review: ReviewDecision = Field(exclude=True)
+    response_source: ResponseSource = "review"
+    risk_level: RiskLevel | None = None
+    reflection_draft: str | None = Field(default=None, exclude=True)
+    review: ReviewDecision | None = Field(default=None, exclude=True)
+
+    @model_validator(mode="after")
+    def validate_response_provenance(self) -> "AgentResult":
+        has_review_artifacts = self.reflection_draft is not None and self.review is not None
+        has_partial_review_artifacts = (self.reflection_draft is None) != (self.review is None)
+        if has_partial_review_artifacts:
+            raise ValueError("Review provenance requires both draft and decision.")
+
+        if self.response_source == "review":
+            if not has_review_artifacts or self.review is None:
+                raise ValueError("A reviewed response requires Review artifacts.")
+            if self.review.risk_level != "none":
+                raise ValueError("Risk responses must use the deterministic safety envelope.")
+            if self.response.strip() != self.review.final_response.strip():
+                raise ValueError("A reviewed response must match Review final_response.")
+            if self.mode == "safety-guard":
+                raise ValueError("A normal reviewed response cannot use safety-guard mode.")
+            if self.risk_level is None:
+                self.risk_level = self.review.risk_level
+            elif self.risk_level != self.review.risk_level:
+                raise ValueError("Agent and Review risk levels must match.")
+
+        elif self.response_source == "review_safety_envelope":
+            if not has_review_artifacts or self.review is None:
+                raise ValueError("A Review safety envelope requires Review artifacts.")
+            if self.review.risk_level not in {"concerning", "urgent"}:
+                raise ValueError("A Review safety envelope requires elevated risk.")
+            if self.mode != "safety-guard":
+                raise ValueError("A Review safety envelope requires safety-guard mode.")
+            if self.risk_level is None:
+                self.risk_level = self.review.risk_level
+            elif self.risk_level != self.review.risk_level:
+                raise ValueError("Agent and Review risk levels must match.")
+
+        elif self.response_source == "safety_guard":
+            if has_review_artifacts:
+                raise ValueError("A preflight safety response cannot claim Review artifacts.")
+            if self.risk_level not in {"concerning", "urgent"}:
+                raise ValueError("A preflight safety response requires elevated risk.")
+            if self.mode != "safety-guard":
+                raise ValueError("A preflight safety response requires safety-guard mode.")
+
+        else:
+            if has_review_artifacts:
+                raise ValueError("A safe fallback cannot claim Review artifacts.")
+            if self.risk_level is not None:
+                raise ValueError("A safe fallback must not infer a user risk level.")
+            if self.mode != "safety-guard":
+                raise ValueError("A safe fallback requires safety-guard mode.")
+
+        expected_support_mode = (
+            "reflection" if self.risk_level == "none" else "support"
+        )
+        if self.response_source == "safe_fallback":
+            expected_support_mode = "support"
+        if self.support_mode != expected_support_mode:
+            raise ValueError("Risk and support mode must remain consistent.")
+        if self.support_mode == "support" and self.memory_candidate is not None:
+            raise ValueError("Support responses cannot include a memory candidate.")
+        return self

@@ -7,6 +7,8 @@ import {
   type EvalErrorCode,
   type EvalGatewayErrorCode,
   type EvalPipelineFailure,
+  type EvalResponseSource,
+  type EvalRiskLevel,
   type EvalRunResponse,
   type EvalSuite,
   fetchEvalSuites,
@@ -40,6 +42,19 @@ const gatewayErrorLabels: Record<EvalGatewayErrorCode, string> = {
   unexpected_error: "未预期的管线错误",
 };
 
+const responseSourceLabels: Record<EvalResponseSource, string> = {
+  review: "Review 审核回答",
+  safety_guard: "模型前安全闸门",
+  review_safety_envelope: "Review 后安全包络",
+  safe_fallback: "固定安全降级",
+};
+
+const riskLevelLabels: Record<EvalRiskLevel, string> = {
+  none: "无明确风险",
+  concerning: "需要关注",
+  urgent: "紧急风险",
+};
+
 function formatRate(value: number): string {
   return `${value.toFixed(value % 1 === 0 ? 0 : 1)}%`;
 }
@@ -66,6 +81,16 @@ function summarizeCategories(results: EvalCaseResult[]): CategorySummary[] {
   return [...categories.values()].sort((left, right) =>
     left.name.localeCompare(right.name, "zh-CN"),
   );
+}
+
+function finalResponseTitle(source?: EvalResponseSource): string {
+  if (source === "safety_guard") return "最终回答（模型前安全闸门）";
+  if (source === "review_safety_envelope") {
+    return "最终回答（Review 后安全包络）";
+  }
+  if (source === "safe_fallback") return "最终回答（固定安全降级）";
+  if (source === "review") return "最终回答（Review 后）";
+  return "最终回答（未生成回答）";
 }
 
 function PipelineFailureDetails({
@@ -146,6 +171,8 @@ function CaseResult({ result }: { result: EvalCaseResult }) {
       : result.memory_candidate_confidence === "low"
         ? "低置信度"
         : "未返回置信度";
+  const directSafetyGuard =
+    result.response_source === "safety_guard" && !result.review_completed;
 
   return (
     <details className="quiet-card overflow-hidden">
@@ -196,10 +223,42 @@ function CaseResult({ result }: { result: EvalCaseResult }) {
           <div>
             <dt className="text-xs font-semibold text-[var(--muted)]">Review</dt>
             <dd className="mt-1">
-              {result.review_completed ? "已完成" : "未完成"}
+              {result.review_completed
+                ? "已完成"
+                : directSafetyGuard
+                  ? "按设计跳过"
+                  : "未完成"}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-xs font-semibold text-[var(--muted)]">回答路径</dt>
+            <dd className="mt-1 break-words">
+              {result.response_source
+                ? responseSourceLabels[result.response_source]
+                : "未生成回答"}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-xs font-semibold text-[var(--muted)]">规范风险</dt>
+            <dd className="mt-1">
+              {result.risk_level
+                ? riskLevelLabels[result.risk_level]
+                : "未返回"}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-xs font-semibold text-[var(--muted)]">安全闸门</dt>
+            <dd className="mt-1">
+              {result.safety_guard_applied ? "已应用" : "未应用"}
             </dd>
           </div>
         </dl>
+
+        {directSafetyGuard && (
+          <p className="mt-5 rounded-2xl border border-[#9eb5a6] bg-[#eef2ec] px-4 py-3 text-sm leading-6 text-[#48675b]">
+            模型前安全闸门按设计直接响应，未调用 Review。
+          </p>
+        )}
 
         {result.error && (
           <div className="mt-5 rounded-2xl border border-[#c7aaa4] bg-[#f8efec] px-4 py-3 text-sm leading-6 text-[#7a463d]">
@@ -285,13 +344,17 @@ function CaseResult({ result }: { result: EvalCaseResult }) {
             </div>
           ) : (
             <p className="mt-2 rounded-2xl border border-[var(--line)] px-4 py-3 text-sm text-[var(--muted)]">
-              未返回 Review metadata；本案例的 Review 未完成。
+              {directSafetyGuard
+                ? "模型前安全闸门按设计直接响应，因此没有调用 Review。"
+                : "未返回 Review metadata；本案例的 Review 未完成。"}
             </p>
           )}
         </section>
 
         <section className="mt-6">
-          <h3 className="text-sm font-semibold">最终回答（Review 后）</h3>
+          <h3 className="text-sm font-semibold">
+            {finalResponseTitle(result.response_source)}
+          </h3>
           <div className="mt-2 whitespace-pre-wrap break-words rounded-2xl border border-[var(--line)] bg-[var(--surface)] px-4 py-3 text-sm leading-7">
             {result.final_response ?? "未返回最终回答。"}
           </div>
