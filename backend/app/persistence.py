@@ -88,7 +88,7 @@ def should_persist_response(
 
 
 class SupabasePersistence:
-    """User-scoped PostgREST access; every request remains subject to RLS."""
+    """RLS-scoped user access plus one narrow server-only reviewed-turn write."""
 
     def __init__(
         self,
@@ -160,6 +160,9 @@ class SupabasePersistence:
                 "client_turn_id": str(client_turn_id),
                 "role": "user",
                 "content": user_message,
+                "response_source": None,
+                "support_mode": None,
+                "risk_level": None,
                 "created_at": created_at.isoformat(),
             },
             {

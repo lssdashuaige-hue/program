@@ -9,7 +9,10 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from app.config import Settings, get_settings
 
 
-AUTH_REQUEST_TIMEOUT_SECONDS = 5.0
+# Hosted Auth can occasionally take longer than five seconds to validate a
+# fresh session. Keep this fail-closed and bounded, while allowing the latency
+# observed in the live two-user RLS verification.
+AUTH_REQUEST_TIMEOUT_SECONDS = 10.0
 _bearer = HTTPBearer(auto_error=False)
 
 

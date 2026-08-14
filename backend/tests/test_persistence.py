@@ -378,6 +378,11 @@ def test_save_reviewed_turn_bulk_inserts_only_public_pair() -> None:
         assert all(row["user_id"] == str(user_id) for row in payload)
         assert all(row["conversation_id"] == str(conversation_id) for row in payload)
         assert all(row["client_turn_id"] == str(turn_id) for row in payload)
+        assert set(payload[0]) == set(payload[1])
+        user_row = next(row for row in payload if row["role"] == "user")
+        assert user_row["response_source"] is None
+        assert user_row["support_mode"] is None
+        assert user_row["risk_level"] is None
         assert "SENTINEL_DRAFT" not in request.content.decode()
         assert "SENTINEL_RATIONALE" not in request.content.decode()
 
