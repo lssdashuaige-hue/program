@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { AuthStatus } from "@/components/auth-status";
 import { OpenRingMark } from "@/components/open-ring-mark";
 
 export type AppSection = "explore" | "history" | "map" | "privacy";
@@ -63,12 +64,13 @@ export function SiteHeader(props: SiteHeaderProps) {
                 );
               })}
             </nav>
-            <Link
-              className="button-quiet px-3"
-              href="/help/safety"
-            >
-              安全与边界
-            </Link>
+            <div className="flex items-center gap-1">
+              <Link className="button-quiet px-3" href="/help/safety">
+                <span className="sm:hidden">安全</span>
+                <span className="hidden sm:inline">安全与边界</span>
+              </Link>
+              <AuthStatus />
+            </div>
           </>
         ) : (
           <>

@@ -2,7 +2,6 @@
 
 import { useRouter } from "next/navigation";
 import { FormEvent, useEffect, useRef, useState } from "react";
-import { AuthStatus } from "@/components/auth-status";
 import { MemoryCandidateCard } from "@/components/memory-candidate-card";
 import {
   type MemoryCandidate,
@@ -64,6 +63,21 @@ function persistenceMessage(persistence: PersistenceResult): string | null {
     default:
       return null;
   }
+}
+
+function requestErrorMessage(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return "这次没有连接成功。你的表达已经保留，可以稍后重试。";
+  }
+
+  if (
+    error instanceof TypeError ||
+    /failed to fetch|networkerror|load failed/i.test(error.message)
+  ) {
+    return "这次没有连接成功。你的表达已经保留，可以稍后重试。";
+  }
+
+  return error.message || "这次没有完成。你的表达已经保留，可以稍后重试。";
 }
 
 export function ReflectionRoom({
@@ -178,7 +192,7 @@ export function ReflectionRoom({
           "已停止等待，你的文字已经放回输入框。若服务端此前已完成，使用同一内容重试会恢复已保存的结果。",
         );
       } else {
-        setError(caught instanceof Error ? caught.message : "出现了未知错误。");
+        setError(requestErrorMessage(caught));
       }
     } finally {
       if (abortControllerRef.current === controller) {
@@ -238,7 +252,7 @@ export function ReflectionRoom({
 
   return (
     <section className="mx-auto flex min-h-[calc(100vh-7rem)] w-full max-w-4xl flex-col px-5 py-8 sm:px-8">
-      <header className="mb-7 flex items-start justify-between gap-5 border-b border-[var(--line)] pb-6">
+      <header className="mb-7 border-b border-[var(--line)] pb-6">
         <div>
           <p className="mb-2 text-xs font-medium tracking-[0.22em] text-[var(--muted)] uppercase">Reflection room</p>
           <h1 className="text-2xl font-medium tracking-[-0.03em] sm:text-3xl">
@@ -247,7 +261,6 @@ export function ReflectionRoom({
               : "今天，你想从哪里开始？"}
           </h1>
         </div>
-        <AuthStatus />
       </header>
       <section className="mb-7" aria-labelledby="starting-prompts-title">
         <p

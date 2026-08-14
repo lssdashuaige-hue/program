@@ -15,6 +15,8 @@ export const metadata: Metadata = {
   description: "回到一段已保存的探索，并从原来的上下文继续。",
 };
 
+export const dynamic = "force-dynamic";
+
 type Props = {
   params: Promise<{ conversationId: string }>;
 };

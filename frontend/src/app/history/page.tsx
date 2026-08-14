@@ -15,6 +15,8 @@ export const metadata: Metadata = {
   description: "按主题回看自己的探索，并在原来的上下文中继续。",
 };
 
+export const dynamic = "force-dynamic";
+
 const historyLayers = [
   {
     title: "你的原话",

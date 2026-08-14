@@ -11,7 +11,11 @@ export const metadata: Metadata = {
 };
 
 type Props = {
-  searchParams: Promise<{ error?: string; next?: string }>;
+  searchParams: Promise<{
+    error?: string;
+    logout?: string;
+    next?: string;
+  }>;
 };
 
 export default async function AuthPage({ searchParams }: Props) {
@@ -59,6 +63,14 @@ export default async function AuthPage({ searchParams }: Props) {
               role="alert"
             >
               登录链接无效或已经过期，请重新发送。
+            </p>
+          )}
+          {params.logout === "partial" && (
+            <p
+              className="mt-5 rounded-2xl border border-[#c9a9a2] bg-[#f6ece8] px-4 py-3 text-sm leading-6 text-[var(--clay)]"
+              role="alert"
+            >
+              已离开私密页面，但本浏览器的登录清理和服务端会话撤销没有得到完整确认。若这是共享设备，请关闭所有 PAS 页面。这不代表其他设备上的登录已经退出。
             </p>
           )}
           <EmailSignInForm nextPath={nextPath} />

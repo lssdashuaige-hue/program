@@ -30,7 +30,7 @@ export default function PrivacyPage() {
           <h2 className="text-2xl font-medium tracking-[-0.035em]" id="privacy-now">
             当前真实边界
           </h2>
-          <div className="mt-6 grid gap-4 md:grid-cols-3">
+          <div className="mt-6 grid gap-4 md:grid-cols-2 lg:grid-cols-4">
             {[
               [
                 "探索会话",
@@ -40,6 +40,10 @@ export default function PrivacyPage() {
               [
                 "不保存的选择",
                 "你可以保持未登录状态进行临时探索，也可以对每条候选记忆选择暂不保存。",
+              ],
+              [
+                "退出登录",
+                "退出只结束当前浏览器里的这次登录，不会删除已经保存的探索，也不会退出其他设备。",
               ],
             ].map(([title, description]) => (
               <article className="quiet-card p-6" key={title}>
