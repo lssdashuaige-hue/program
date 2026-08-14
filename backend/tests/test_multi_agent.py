@@ -70,6 +70,7 @@ def test_review_agent_can_approve_draft() -> None:
 
     assert result.response == "你似乎很累。哪一种疲惫最接近你的体验？"
     assert result.mode == "dual-agent"
+    assert result.support_mode == "reflection"
     assert [call[0] for call in gateway.calls] == ["reflection", "review"]
 
 
@@ -120,6 +121,7 @@ def test_chat_endpoint_returns_only_reviewed_response() -> None:
     assert response.json() == {
         "response": "这是经过审核和改写的探索回应。",
         "mode": "dual-agent",
+        "support_mode": "reflection",
     }
     assert "未经审核" not in response.text
 
@@ -136,3 +138,18 @@ def test_chat_endpoint_fails_closed_when_review_is_unavailable() -> None:
     assert response.status_code == 503
     assert response.json()["detail"] == "PAS 暂时无法完成安全审核，请稍后再试。"
     assert "绝不能返回的草稿" not in response.text
+
+
+def test_chat_endpoint_is_unavailable_without_review_pipeline() -> None:
+    app.dependency_overrides[get_orchestrator] = lambda: None
+
+    try:
+        response = TestClient(app).post("/chat", json={"message": "我想整理一下今天"})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == (
+        "PAS 的 AI 与安全审核尚未配置，当前无法开始探索。"
+    )
+    assert "response" not in response.json()

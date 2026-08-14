@@ -16,6 +16,8 @@ ReviewIssue = Literal[
 ]
 
 RiskLevel = Literal["none", "concerning", "urgent"]
+AgentMode = Literal["dual-agent", "multi-agent"]
+SupportMode = Literal["reflection", "support"]
 MemoryKind = Literal["experience", "reflection", "pattern", "need"]
 MemoryConfidence = Literal["low", "medium"]
 
@@ -76,5 +78,6 @@ class MemoryDecision(BaseModel):
 
 class AgentResult(BaseModel):
     response: str
-    mode: Literal["dual-agent", "multi-agent"] = "dual-agent"
+    mode: AgentMode = "dual-agent"
+    support_mode: SupportMode
     memory_candidate: MemoryCandidate | None = None

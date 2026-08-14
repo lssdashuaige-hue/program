@@ -8,6 +8,7 @@ PAS uses Supabase passwordless email login. Configure these local variables:
 NEXT_PUBLIC_SUPABASE_URL=
 NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=
 NEXT_PUBLIC_API_URL=http://localhost:8000
+NEXT_PUBLIC_SITE_URL=http://localhost:3000
 ```
 
 The Supabase project's allowed redirect URLs must include:

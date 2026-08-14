@@ -1,14 +1,16 @@
-import Link from "next/link";
+import type { Metadata } from "next";
+import { AppShell } from "@/components/app-shell";
 import { ReflectionRoom } from "@/components/reflection-room";
+
+export const metadata: Metadata = {
+  title: "反思空间",
+  description: "从此刻真实的体验开始一次开放、非诊断式的自我探索。",
+};
 
 export default function ExplorePage() {
   return (
-    <main>
-      <nav className="mx-auto flex h-20 w-full max-w-6xl items-center justify-between px-5 sm:px-8">
-        <Link className="text-sm font-semibold tracking-[0.18em]" href="/">PAS</Link>
-        <Link className="text-sm text-[var(--muted)] hover:text-[var(--ink)]" href="/">返回首页</Link>
-      </nav>
+    <AppShell active="explore">
       <ReflectionRoom />
-    </main>
+    </AppShell>
   );
 }

@@ -5,7 +5,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.ai.memory_agent import MemoryAgent
-from app.ai.models import MemoryDecision, ReviewDecision
+from app.ai.models import MemoryDecision, ReviewDecision, RiskLevel
 from app.ai.orchestrator import MultiAgentOrchestrator
 from app.ai.reflection_agent import ReflectionAgent
 from app.ai.review_agent import ReviewAgent
@@ -17,9 +17,12 @@ class MemoryPipelineGateway:
         *,
         memory_decision: MemoryDecision | None,
         fail_memory: bool = False,
+        risk_level: RiskLevel = "none",
     ) -> None:
         self.memory_decision = memory_decision
         self.fail_memory = fail_memory
+        self.risk_level = risk_level
+        self.memory_calls = 0
 
     async def generate_text(self, **kwargs: Any) -> str:
         return "我们可以先看看这个模式在什么情境下出现。"
@@ -30,9 +33,10 @@ class MemoryPipelineGateway:
                 approved=True,
                 final_response="我们可以先看看这个模式在什么情境下出现。",
                 issues=[],
-                risk_level="none",
+                risk_level=self.risk_level,
                 rationale="Safe exploratory response.",
             )
+        self.memory_calls += 1
         if self.fail_memory:
             raise RuntimeError("memory unavailable")
         assert self.memory_decision is not None
@@ -83,6 +87,7 @@ def test_memory_agent_returns_candidate_without_persisting() -> None:
     )
 
     assert result.mode == "multi-agent"
+    assert result.support_mode == "reflection"
     assert result.memory_candidate is not None
     assert result.memory_candidate.kind == "pattern"
     assert result.memory_candidate.confidence == "medium"
@@ -98,6 +103,31 @@ def test_memory_failure_does_not_block_reviewed_response() -> None:
     assert result.response == "我们可以先看看这个模式在什么情境下出现。"
     assert result.mode == "multi-agent"
     assert result.memory_candidate is None
+
+
+@pytest.mark.parametrize("risk_level", ["concerning", "urgent"])
+def test_support_review_uses_support_mode_without_calling_memory_agent(
+    risk_level: RiskLevel,
+) -> None:
+    gateway = MemoryPipelineGateway(
+        risk_level=risk_level,
+        memory_decision=MemoryDecision(
+            should_propose=True,
+            kind="reflection",
+            content="这条候选绝不能在紧急风险时返回。",
+            confidence="low",
+            confirmation_prompt="要保存吗？",
+            rationale="This would only be returned if the guard failed.",
+        ),
+    )
+
+    result = asyncio.run(
+        build_memory_pipeline(gateway).respond("我不想活了")
+    )
+
+    assert result.support_mode == "support"
+    assert result.memory_candidate is None
+    assert gateway.memory_calls == 0
 
 
 def test_declined_memory_cannot_contain_candidate_fields() -> None:

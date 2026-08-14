@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 
 from app.ai.gateway import DeepSeekChatGateway, OpenAIResponsesGateway
 from app.ai.memory_agent import MemoryAgent
-from app.ai.models import MemoryCandidate
+from app.ai.models import AgentMode, MemoryCandidate, SupportMode
 from app.ai.orchestrator import AgentPipelineError, MultiAgentOrchestrator
 from app.ai.prompts import (
     memory_instructions,
@@ -25,7 +25,8 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     response: str
-    mode: str = "scaffold"
+    mode: AgentMode
+    support_mode: SupportMode
     memory_candidate: MemoryCandidate | None = None
 
 
@@ -94,12 +95,9 @@ async def chat(
     orchestrator: MultiAgentOrchestrator | None = Depends(get_orchestrator),
 ) -> ChatResponse:
     if orchestrator is None:
-        return ChatResponse(
-            response=(
-                "我听见你正在尝试描述一段对你重要的体验。"
-                "在继续寻找原因之前，你愿意先说说："
-                "这件事发生时最明显的感受是什么吗？"
-            )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="PAS 的 AI 与安全审核尚未配置，当前无法开始探索。",
         )
 
     try:
@@ -113,5 +111,6 @@ async def chat(
     return ChatResponse(
         response=result.response,
         mode=result.mode,
+        support_mode=result.support_mode,
         memory_candidate=result.memory_candidate,
     )

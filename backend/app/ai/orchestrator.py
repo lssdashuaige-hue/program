@@ -34,7 +34,7 @@ class MultiAgentOrchestrator:
             raise AgentPipelineError("Review Agent produced an empty final response.")
 
         memory_candidate = None
-        if self._memory_agent is not None:
+        if self._memory_agent is not None and decision.risk_level == "none":
             try:
                 memory_decision = await self._memory_agent.evaluate(
                     user_message=user_message,
@@ -49,5 +49,8 @@ class MultiAgentOrchestrator:
         return AgentResult(
             response=final_response,
             mode="multi-agent" if self._memory_agent is not None else "dual-agent",
+            support_mode=(
+                "reflection" if decision.risk_level == "none" else "support"
+            ),
             memory_candidate=memory_candidate,
         )
