@@ -50,6 +50,22 @@ py -m venv .venv
 
 Copy each `.env.example` to its local `.env` file before connecting cloud services. Never commit real credentials.
 
+## Internal PAS evaluations
+
+The development-only evaluation page is available at `/internal/evals`. It runs
+synthetic PAS boundary cases through the same Reflection → Review → optional
+Memory pipeline used by `/chat`, then displays the internal review trace and
+deterministic assertions.
+
+The evaluation API is disabled by default. To enable it locally, set
+`PAS_EVALS_ENABLED=true` and a unique `PAS_EVALS_ADMIN_TOKEN` of at least 24
+characters in `backend/.env`. The page accepts this evaluation token only in
+memory. It never accepts an OpenAI, DeepSeek, or other provider API key.
+
+Evaluation runs use the model provider already selected by the backend and can
+incur provider usage. Use synthetic cases only. Do not paste real user
+conversations into the internal evaluation API.
+
 ## Project status
 
 - GitHub: [lssdashuaige-hue/program](https://github.com/lssdashuaige-hue/program)

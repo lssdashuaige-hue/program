@@ -81,3 +81,5 @@ class AgentResult(BaseModel):
     mode: AgentMode = "dual-agent"
     support_mode: SupportMode
     memory_candidate: MemoryCandidate | None = None
+    reflection_draft: str = Field(exclude=True)
+    review: ReviewDecision = Field(exclude=True)

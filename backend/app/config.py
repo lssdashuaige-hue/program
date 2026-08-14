@@ -1,6 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -27,6 +28,8 @@ class Settings(BaseSettings):
     deepseek_reflection_reasoning_effort: Literal["high", "max"] = "high"
     deepseek_review_reasoning_effort: Literal["high", "max"] = "high"
     memory_agent_enabled: bool = False
+    pas_evals_enabled: bool = False
+    pas_evals_admin_token: SecretStr | None = None
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

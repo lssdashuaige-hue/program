@@ -8,6 +8,25 @@ class AgentPipelineError(RuntimeError):
     """Raised when PAS cannot safely complete the reviewed response pipeline."""
 
 
+_MEMORY_OPT_OUT_MARKERS = (
+    "不要记住",
+    "别记住",
+    "不要保存",
+    "别保存",
+    "不要写入记忆",
+    "不允许保存",
+    "do not remember",
+    "don't remember",
+    "do not save",
+    "don't save",
+)
+
+
+def memory_opt_out_requested(user_message: str) -> bool:
+    normalized = user_message.casefold()
+    return any(marker in normalized for marker in _MEMORY_OPT_OUT_MARKERS)
+
+
 class MultiAgentOrchestrator:
     def __init__(
         self,
@@ -34,7 +53,11 @@ class MultiAgentOrchestrator:
             raise AgentPipelineError("Review Agent produced an empty final response.")
 
         memory_candidate = None
-        if self._memory_agent is not None and decision.risk_level == "none":
+        if (
+            self._memory_agent is not None
+            and decision.risk_level == "none"
+            and not memory_opt_out_requested(user_message)
+        ):
             try:
                 memory_decision = await self._memory_agent.evaluate(
                     user_message=user_message,
@@ -53,4 +76,6 @@ class MultiAgentOrchestrator:
                 "reflection" if decision.risk_level == "none" else "support"
             ),
             memory_candidate=memory_candidate,
+            reflection_draft=draft,
+            review=decision,
         )

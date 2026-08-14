@@ -130,6 +130,27 @@ def test_support_review_uses_support_mode_without_calling_memory_agent(
     assert gateway.memory_calls == 0
 
 
+def test_explicit_memory_opt_out_does_not_call_memory_agent() -> None:
+    gateway = MemoryPipelineGateway(
+        memory_decision=MemoryDecision(
+            should_propose=True,
+            kind="reflection",
+            content="这条候选不应生成。",
+            confidence="low",
+            confirmation_prompt="要保存吗？",
+            rationale="Only returned if opt-out enforcement failed.",
+        )
+    )
+
+    result = asyncio.run(
+        build_memory_pipeline(gateway).respond("这轮内容不要记住，也不要保存。")
+    )
+
+    assert result.support_mode == "reflection"
+    assert result.memory_candidate is None
+    assert gateway.memory_calls == 0
+
+
 def test_declined_memory_cannot_contain_candidate_fields() -> None:
     with pytest.raises(ValidationError):
         MemoryDecision(
