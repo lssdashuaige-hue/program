@@ -11,6 +11,7 @@ from app.evals.models import (
     EVAL_RUN_TIMEOUT_MARGIN_SECONDS,
     MAX_EVAL_CASES,
     MAX_EVAL_CONCURRENCY,
+    MAX_EVAL_HISTORY_MESSAGES,
     MAX_EVAL_INPUT_LENGTH,
 )
 from app.main import app
@@ -104,13 +105,19 @@ def test_health_and_suite_metadata_are_protected_and_read_only() -> None:
     assert health.status_code == 200
     assert health.json()["provider_ready"] is True
     assert health.json()["limits"]["max_cases"] == MAX_EVAL_CASES
+    assert (
+        health.json()["limits"]["max_history_messages"]
+        == MAX_EVAL_HISTORY_MESSAGES
+    )
     required_run_budget = (
         (MAX_EVAL_CASES + MAX_EVAL_CONCURRENCY - 1) // MAX_EVAL_CONCURRENCY
     ) * EVAL_CASE_TIMEOUT_SECONDS + EVAL_RUN_TIMEOUT_MARGIN_SECONDS
     assert health.json()["limits"]["run_timeout_seconds"] >= required_run_budget
     assert suites.status_code == 200
-    assert suites.json()[0]["name"] == "pas-core-v0.1"
-    assert suites.json()[0]["case_count"] == MAX_EVAL_CASES
+    suite_payload = {item["name"]: item for item in suites.json()}
+    assert set(suite_payload) == {"pas-core-v0.1", "pas-dialogue-v0.1"}
+    assert suite_payload["pas-core-v0.1"]["case_count"] == MAX_EVAL_CASES
+    assert suite_payload["pas-dialogue-v0.1"]["case_count"] == MAX_EVAL_CASES
 
 
 def test_run_requires_a_configured_reviewed_pipeline() -> None:
@@ -123,6 +130,20 @@ def test_run_requires_a_configured_reviewed_pipeline() -> None:
     )
 
     assert response.status_code == 503
+
+
+def test_dialogue_suite_dispatches_through_the_internal_api() -> None:
+    authorize(eval_settings(), StaticOrchestrator())
+
+    response = TestClient(app).post(
+        "/internal/evals/run",
+        headers=auth_headers(),
+        json={"suite": "pas-dialogue-v0.1"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["suite"] == "pas-dialogue-v0.1"
+    assert response.json()["case_count"] == MAX_EVAL_CASES
 
 
 def test_explicit_cases_require_synthetic_classification() -> None:
@@ -145,6 +166,36 @@ def test_explicit_cases_require_synthetic_classification() -> None:
             "cases": [
                 {"case_id": f"case_{index}", "category": "limit", "input": "x"}
                 for index in range(MAX_EVAL_CASES + 1)
+            ],
+            "data_classification": "synthetic",
+        },
+        {
+            "cases": [
+                {
+                    "case_id": "history_limit",
+                    "category": "limit",
+                    "input": "合成测试",
+                    "conversation_history": [
+                        {"role": "user", "content": f"合成历史 {index}"}
+                        for index in range(MAX_EVAL_HISTORY_MESSAGES + 1)
+                    ],
+                }
+            ],
+            "data_classification": "synthetic",
+        },
+        {
+            "cases": [
+                {
+                    "case_id": "history_secret",
+                    "category": "privacy",
+                    "input": "合成测试",
+                    "conversation_history": [
+                        {
+                            "role": "user",
+                            "content": "DEEPSEEK_API_KEY=sk-not-real-1234567890",
+                        }
+                    ],
+                }
             ],
             "data_classification": "synthetic",
         },
@@ -180,6 +231,49 @@ def test_explicit_cases_require_synthetic_classification() -> None:
             "data_classification": "synthetic",
         },
         {
+            "cases": [
+                {
+                    "case_id": "supabase_secret",
+                    "category": "privacy",
+                    "input": (
+                        "SUPABASE_SECRET_KEY="
+                        "sb_secret_synthetic_not_real_1234567890"
+                    ),
+                }
+            ],
+            "data_classification": "synthetic",
+        },
+        {
+            "cases": [
+                {
+                    "case_id": "bare_supabase_secret",
+                    "category": "privacy",
+                    "input": "sb_secret_synthetic_not_real_1234567890",
+                }
+            ],
+            "data_classification": "synthetic",
+        },
+        {
+            "cases": [
+                {
+                    "case_id": "jwt_history_secret",
+                    "category": "privacy",
+                    "input": "合成测试",
+                    "conversation_history": [
+                        {
+                            "role": "user",
+                            "content": (
+                                "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+                                "eyJyb2xlIjoic2VydmljZV9yb2xlIn0."
+                                "syntheticsignaturevalue"
+                            ),
+                        }
+                    ],
+                }
+            ],
+            "data_classification": "synthetic",
+        },
+        {
             "suite": "pas-core-v0.1",
             "openai_api_key": "must-not-be-accepted",
         },
@@ -202,7 +296,10 @@ def test_request_limits_and_secret_fields_are_rejected(body: dict[str, Any]) -> 
     )
 
     assert response.status_code == 422
+    assert "sk-not-real-1234567890" not in response.text
     assert "sk-not-a-real-key-1234567890" not in response.text
+    assert "sb_secret_synthetic_not_real_1234567890" not in response.text
+    assert "syntheticsignaturevalue" not in response.text
     assert "must-not-be-accepted" not in response.text
     assert "real-user-id" not in response.text
 
@@ -215,6 +312,10 @@ def test_run_report_contains_auditable_fields_but_no_secrets() -> None:
                 "case_id": "normal",
                 "category": "reflection",
                 "input": "这是完全合成的测试表达。",
+                "conversation_history": [
+                    {"role": "user", "content": "这是合成的上一轮表达。"},
+                    {"role": "assistant", "content": "这是合成的上一轮回应。"},
+                ],
                 "expected_support_mode": "reflection",
             }
         ],
@@ -233,6 +334,10 @@ def test_run_report_contains_auditable_fields_but_no_secrets() -> None:
     assert report["data_classification"] == "synthetic"
     assert case["case_id"] == "normal"
     assert case["input"] == "这是完全合成的测试表达。"
+    assert case["conversation_history"] == [
+        {"role": "user", "content": "这是合成的上一轮表达。"},
+        {"role": "assistant", "content": "这是合成的上一轮回应。"},
+    ]
     assert case["final_response"]
     assert case["mode"] == "dual-agent"
     assert case["support_mode"] == "reflection"

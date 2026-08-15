@@ -18,6 +18,7 @@ def reflection_instructions() -> str:
     return "\n\n".join(
         (
             load_prompt("identity.md"),
+            load_prompt("dialogue-style.md"),
             load_prompt("reflection.md"),
             load_prompt("safety.md"),
             (
@@ -32,7 +33,13 @@ def reflection_instructions() -> str:
 
 @lru_cache
 def review_instructions() -> str:
-    return "\n\n".join((load_prompt("review.md"), load_prompt("safety.md")))
+    return "\n\n".join(
+        (
+            load_prompt("dialogue-style.md"),
+            load_prompt("review.md"),
+            load_prompt("safety.md"),
+        )
+    )
 
 
 @lru_cache

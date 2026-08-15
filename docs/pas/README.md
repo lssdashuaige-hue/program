@@ -48,6 +48,7 @@ PAS 的核心承诺是：
 23. [PAS-023 Data Privacy & Trust](PAS-023-DATA-PRIVACY-TRUST.md)
 24. [PAS-024 Scaling & Production Readiness](PAS-024-SCALING-PRODUCTION.md)
 25. [PAS-025 Project Initialization](PAS-025-PROJECT-INITIALIZATION.md)
+26. [PAS-026 Dialogue Style and Evidence Standard](PAS-026-DIALOGUE-STYLE-STANDARD.md)
 
 ## 规范优先级
 

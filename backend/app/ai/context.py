@@ -26,9 +26,13 @@ def reflection_input(
             ],
             "current_user_message": user_message,
             "instruction": (
-                "Use the history only as prior reviewed context. Respond to the "
-                "current user message and do not claim that history is a diagnosis "
-                "or a fixed truth about the user."
+                "Use only the history supplied in this payload. User entries are "
+                "user reports, not independently verified facts. Assistant entries "
+                "are prior AI outputs that passed response review, not evidence or "
+                "verified truth. Review does not promote a hypothesis to fact. Do "
+                "not claim access to any other conversation or memory that is not "
+                "present here. Respond to the current message without turning "
+                "history into a diagnosis or fixed identity."
             ),
         },
         ensure_ascii=False,
@@ -50,8 +54,10 @@ def review_input(
             for item in conversation_history
         ]
         payload["history_boundary"] = (
-            "History is prior reviewed context only. Evaluate the draft against "
-            "the current message and PAS constraints; do not treat history as a "
-            "diagnosis or fixed truth."
+            "Only the supplied history is available. User entries are user reports; "
+            "assistant entries are prior AI outputs, and passing Review did not "
+            "verify them as facts. Reject any draft that launders an assistant "
+            "hypothesis into user fact, increases confidence through repetition, "
+            "or claims access to another conversation or memory not present here."
         )
     return json.dumps(payload, ensure_ascii=False)

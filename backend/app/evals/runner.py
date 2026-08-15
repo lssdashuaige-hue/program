@@ -7,6 +7,7 @@ from app.ai.gateway import (
     PipelineStage,
     gateway_error_retryable,
 )
+from app.ai.context import ConversationContextMessage
 from app.ai.orchestrator import (
     AgentPipelineError,
     MultiAgentOrchestrator,
@@ -82,10 +83,18 @@ class EvalRunner:
     ) -> EvalCaseReport:
         started = perf_counter()
         run_state = PipelineRunState()
+        conversation_history = tuple(
+            ConversationContextMessage(role=item.role, content=item.content)
+            for item in case.conversation_history
+        )
         try:
             async with semaphore:
                 result = await asyncio.wait_for(
-                    self._orchestrator.respond(case.input, run_state=run_state),
+                    self._orchestrator.respond(
+                        case.input,
+                        conversation_history=conversation_history,
+                        run_state=run_state,
+                    ),
                     timeout=self._case_timeout_seconds,
                 )
         except TimeoutError:
@@ -125,6 +134,7 @@ class EvalRunner:
             case_id=case.case_id,
             category=case.category,
             input=case.input,
+            conversation_history=case.conversation_history,
             reflection_draft=_redact_optional(result.reflection_draft),
             final_response=_redact_possible_secret(result.response),
             mode=result.mode,
@@ -175,6 +185,7 @@ class EvalRunner:
             case_id=case.case_id,
             category=case.category,
             input=case.input,
+            conversation_history=case.conversation_history,
             review_completed=False,
             hard_assertions=evaluate_failure(error, stage=pipeline_stage),
             passed=False,

@@ -17,7 +17,10 @@ from app.ai.models import (
 
 MAX_EVAL_CASES = 12
 MAX_EVAL_INPUT_LENGTH = 2000
+MAX_EVAL_HISTORY_MESSAGES = 8
 MAX_EVAL_FORBIDDEN_SUBSTRINGS = 12
+MAX_EVAL_REQUIRED_SUBSTRING_GROUPS = 8
+MAX_EVAL_REQUIRED_SUBSTRINGS_PER_GROUP = 8
 MAX_EVAL_CONCURRENCY = 3
 EVAL_CASE_TIMEOUT_SECONDS = PIPELINE_TIMEOUT_SECONDS
 EVAL_RUN_TIMEOUT_MARGIN_SECONDS = 15.0
@@ -25,19 +28,45 @@ EVAL_RUN_TIMEOUT_SECONDS = (
     (MAX_EVAL_CASES + MAX_EVAL_CONCURRENCY - 1) // MAX_EVAL_CONCURRENCY
 ) * EVAL_CASE_TIMEOUT_SECONDS + EVAL_RUN_TIMEOUT_MARGIN_SECONDS
 
-SuiteName = Literal["pas-core-v0.1"]
+SuiteName = Literal["pas-core-v0.1", "pas-dialogue-v0.1"]
 EvalErrorCode = Literal["pipeline_failed_closed", "timeout", "internal_error"]
 
 _SECRET_PATTERNS = (
     re.compile(r"(?i)\b(?:openai|deepseek|model)[_-]?api[_-]?key\s*[:=]\s*\S+"),
     re.compile(r"(?i)\bapi[_ -]?key\s*[:=]\s*\S+"),
+    re.compile(
+        r"(?i)\bsupabase[_-]?(?:secret|service[_-]?role|publishable|anon)"
+        r"[_-]?key\s*[:=]\s*\S+"
+    ),
+    re.compile(r"(?i)\bsb_(?:secret|publishable)_[a-z0-9_-]{12,}\b"),
     re.compile(r"(?i)\bbearer\s+[a-z0-9._~-]{12,}"),
     re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b"),
+    re.compile(
+        r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"
+    ),
 )
 
 
 def contains_obvious_secret(value: str) -> bool:
     return any(pattern.search(value) for pattern in _SECRET_PATTERNS)
+
+
+class EvalContextMessageSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=MAX_EVAL_INPUT_LENGTH)
+
+    @field_validator("content")
+    @classmethod
+    def validate_synthetic_context(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Evaluation history content must not be blank.")
+        if contains_obvious_secret(value):
+            raise ValueError(
+                "Evaluation history must not contain credentials or API keys."
+            )
+        return value
 
 
 class EvalCaseSpec(BaseModel):
@@ -54,6 +83,10 @@ class EvalCaseSpec(BaseModel):
         pattern=r"^[a-z0-9][a-z0-9_-]*$",
     )
     input: str = Field(min_length=1, max_length=MAX_EVAL_INPUT_LENGTH)
+    conversation_history: list[EvalContextMessageSpec] = Field(
+        default_factory=list,
+        max_length=MAX_EVAL_HISTORY_MESSAGES,
+    )
     expected_support_mode: SupportMode | None = None
     expected_risk_level: RiskLevel | None = None
     expected_response_source: ResponseSource | None = None
@@ -62,6 +95,18 @@ class EvalCaseSpec(BaseModel):
         default_factory=list,
         max_length=MAX_EVAL_FORBIDDEN_SUBSTRINGS,
     )
+    required_any_substring_groups: list[list[str]] = Field(
+        default_factory=list,
+        max_length=MAX_EVAL_REQUIRED_SUBSTRING_GROUPS,
+    )
+    expect_tentative_language: bool = False
+    expect_cross_conversation_boundary: bool = False
+    expect_observer_working_description: bool = False
+    forbid_diagnostic_checklist: bool = False
+    forbid_unfounded_numeric_precision: bool = False
+    forbid_generic_assent_upgrade: bool = False
+    forbid_undefined_code_expansion: bool = False
+    min_response_characters: int = Field(default=0, ge=0, le=500)
 
     @field_validator("input")
     @classmethod
@@ -84,6 +129,33 @@ class EvalCaseSpec(BaseModel):
                 raise ValueError("Assertions must not contain credentials or API keys.")
             normalized.append(item)
         return normalized
+
+    @field_validator("required_any_substring_groups")
+    @classmethod
+    def validate_required_substring_groups(
+        cls,
+        groups: list[list[str]],
+    ) -> list[list[str]]:
+        normalized_groups: list[list[str]] = []
+        for group in groups:
+            if not group or len(group) > MAX_EVAL_REQUIRED_SUBSTRINGS_PER_GROUP:
+                raise ValueError(
+                    "Required substring groups must contain 1 to 8 alternatives."
+                )
+            normalized_group: list[str] = []
+            for value in group:
+                item = value.strip()
+                if not item or len(item) > 160:
+                    raise ValueError(
+                        "Required substrings must contain 1 to 160 characters."
+                    )
+                if contains_obvious_secret(item):
+                    raise ValueError(
+                        "Assertions must not contain credentials or API keys."
+                    )
+                normalized_group.append(item)
+            normalized_groups.append(normalized_group)
+        return normalized_groups
 
 
 class EvalRunRequest(BaseModel):
@@ -115,6 +187,7 @@ class EvalRunRequest(BaseModel):
 class EvalLimits(BaseModel):
     max_cases: int = MAX_EVAL_CASES
     max_input_characters: int = MAX_EVAL_INPUT_LENGTH
+    max_history_messages: int = MAX_EVAL_HISTORY_MESSAGES
     max_concurrency: int = MAX_EVAL_CONCURRENCY
     case_timeout_seconds: float = EVAL_CASE_TIMEOUT_SECONDS
     run_timeout_seconds: float = EVAL_RUN_TIMEOUT_SECONDS
@@ -166,6 +239,7 @@ class EvalCaseReport(BaseModel):
     case_id: str
     category: str
     input: str
+    conversation_history: list[EvalContextMessageSpec] = Field(default_factory=list)
     reflection_draft: str | None = None
     final_response: str | None = None
     mode: AgentMode | None = None

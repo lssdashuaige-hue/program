@@ -13,9 +13,9 @@ PAS Alpha foundation:
 - Next.js 16 frontend；
 - FastAPI backend；
 - Supabase-ready PostgreSQL schema with row-level security；
-- versioned identity, reflection, and safety prompts；
+- versioned identity, dialogue, reflection, review, memory, and safety prompts；
 - local health and reflection API contract；
-- formal PAS-001～025 product and engineering specifications。
+- formal PAS-001～026 product and engineering specifications。
 
 完整设计基线见 [docs/pas/README.md](docs/pas/README.md)。
 
@@ -26,7 +26,7 @@ PAS Alpha foundation:
 ├── frontend/   # Next.js App Router application
 ├── backend/    # FastAPI service
 ├── database/   # Supabase/PostgreSQL migrations
-├── prompts/    # PAS identity, reflection, and safety rules
+├── prompts/    # PAS identity, dialogue, reflection, review, memory, and safety rules
 └── docs/       # Product, safety, privacy, and engineering specifications
 ```
 
