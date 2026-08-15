@@ -23,6 +23,7 @@ from app.evals.models import (
     EvalPipelineFailureReport,
     EvalReviewReport,
     EvalRunReport,
+    EvalRunScope,
     SuiteName,
     contains_obvious_secret,
 )
@@ -59,7 +60,16 @@ class EvalRunner:
         cases: Sequence[EvalCaseSpec],
         *,
         suite: SuiteName | None,
+        run_scope: EvalRunScope | None = None,
+        total_suite_case_count: int | None = None,
     ) -> EvalRunReport:
+        if run_scope is None:
+            run_scope = "full_suite" if suite is not None else "explicit_cases"
+        if run_scope == "explicit_cases":
+            total_suite_case_count = None
+        elif total_suite_case_count is None:
+            total_suite_case_count = len(cases)
+
         started = perf_counter()
         semaphore = asyncio.Semaphore(self._max_concurrency)
         reports = await asyncio.gather(
@@ -68,6 +78,8 @@ class EvalRunner:
         pass_count = sum(report.passed for report in reports)
         return EvalRunReport(
             suite=suite,
+            run_scope=run_scope,
+            total_suite_case_count=total_suite_case_count,
             case_count=len(reports),
             passed=pass_count == len(reports),
             pass_count=pass_count,

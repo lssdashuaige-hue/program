@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.ai.context import ConversationContextMessage
+from app.ai.context import ConversationContextMessage, ResponsePreference
 from app.ai.gateway import DeepSeekChatGateway, OpenAIResponsesGateway
 from app.ai.limits import PIPELINE_TIMEOUT_SECONDS
 from app.ai.memory_agent import MemoryAgent
@@ -42,6 +42,7 @@ class ChatRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     message: str = Field(min_length=1, max_length=8000)
+    response_preference: ResponsePreference | None = None
     conversation_id: UUID | None = None
     client_turn_id: UUID | None = None
 
@@ -286,13 +287,14 @@ async def chat(
         )
 
     try:
-        response_call = (
-            orchestrator.respond(
-                request.message,
-                conversation_history=conversation_history,
-            )
-            if conversation_history
-            else orchestrator.respond(request.message)
+        response_kwargs: dict[str, object] = {}
+        if conversation_history:
+            response_kwargs["conversation_history"] = conversation_history
+        if request.response_preference is not None:
+            response_kwargs["response_preference"] = request.response_preference
+        response_call = orchestrator.respond(
+            request.message,
+            **response_kwargs,
         )
         result = await asyncio.wait_for(
             response_call,

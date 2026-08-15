@@ -1,5 +1,5 @@
 import re
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -29,7 +29,16 @@ EVAL_RUN_TIMEOUT_SECONDS = (
 ) * EVAL_CASE_TIMEOUT_SECONDS + EVAL_RUN_TIMEOUT_MARGIN_SECONDS
 
 SuiteName = Literal["pas-core-v0.1", "pas-dialogue-v0.1"]
+EvalRunScope = Literal["full_suite", "suite_subset", "explicit_cases"]
 EvalErrorCode = Literal["pipeline_failed_closed", "timeout", "internal_error"]
+EvalCaseId = Annotated[
+    str,
+    Field(
+        min_length=1,
+        max_length=64,
+        pattern=r"^[a-z0-9][a-z0-9_-]*$",
+    ),
+]
 
 _SECRET_PATTERNS = (
     re.compile(r"(?i)\b(?:openai|deepseek|model)[_-]?api[_-]?key\s*[:=]\s*\S+"),
@@ -72,11 +81,7 @@ class EvalContextMessageSpec(BaseModel):
 class EvalCaseSpec(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    case_id: str = Field(
-        min_length=1,
-        max_length=64,
-        pattern=r"^[a-z0-9][a-z0-9_-]*$",
-    )
+    case_id: EvalCaseId
     category: str = Field(
         min_length=1,
         max_length=64,
@@ -167,6 +172,11 @@ class EvalRunRequest(BaseModel):
         min_length=1,
         max_length=MAX_EVAL_CASES,
     )
+    case_ids: list[EvalCaseId] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=MAX_EVAL_CASES,
+    )
     data_classification: Literal["synthetic"] | None = None
 
     @model_validator(mode="after")
@@ -177,6 +187,11 @@ class EvalRunRequest(BaseModel):
             raise ValueError(
                 "Explicit cases require data_classification='synthetic'."
             )
+        if self.case_ids is not None:
+            if self.suite is None:
+                raise ValueError("case_ids can only select cases from a built-in suite.")
+            if len(self.case_ids) != len(set(self.case_ids)):
+                raise ValueError("Selected evaluation case IDs must be unique.")
         if self.cases is not None:
             case_ids = [case.case_id for case in self.cases]
             if len(case_ids) != len(set(case_ids)):
@@ -260,6 +275,12 @@ class EvalCaseReport(BaseModel):
 
 class EvalRunReport(BaseModel):
     suite: SuiteName | None = None
+    run_scope: EvalRunScope
+    total_suite_case_count: int | None = Field(
+        default=None,
+        ge=1,
+        le=MAX_EVAL_CASES,
+    )
     data_classification: Literal["synthetic"] = "synthetic"
     case_count: int
     passed: bool
@@ -267,3 +288,23 @@ class EvalRunReport(BaseModel):
     fail_count: int
     duration_ms: int
     cases: list[EvalCaseReport]
+
+    @model_validator(mode="after")
+    def validate_run_scope(self) -> "EvalRunReport":
+        if self.run_scope == "explicit_cases":
+            if self.suite is not None or self.total_suite_case_count is not None:
+                raise ValueError(
+                    "Explicit-case reports cannot claim built-in suite coverage."
+                )
+            return self
+
+        if self.suite is None or self.total_suite_case_count is None:
+            raise ValueError("Suite reports require suite coverage metadata.")
+        if self.total_suite_case_count < self.case_count:
+            raise ValueError("Suite coverage cannot be smaller than the run case count.")
+        if (
+            self.run_scope == "full_suite"
+            and self.total_suite_case_count != self.case_count
+        ):
+            raise ValueError("Full-suite reports must cover every case in the suite.")
+        return self

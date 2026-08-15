@@ -1,4 +1,5 @@
 import asyncio
+from threading import Lock
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -22,6 +23,8 @@ router = APIRouter(
     tags=["internal-evals"],
     include_in_schema=False,
 )
+
+_eval_run_gate = Lock()
 
 
 @router.get("/health", response_model=EvalHealthReport)
@@ -61,20 +64,58 @@ async def run_evals(
             detail="The reviewed PAS pipeline is not configured.",
         )
 
-    cases = list(get_suite(request.suite)) if request.suite else request.cases
+    total_suite_case_count = None
+    if request.suite is not None:
+        suite_cases = get_suite(request.suite)
+        total_suite_case_count = len(suite_cases)
+        if request.case_ids is None:
+            cases = list(suite_cases)
+            run_scope = "full_suite"
+        else:
+            requested_ids = set(request.case_ids)
+            known_ids = {case.case_id for case in suite_cases}
+            unknown_ids = sorted(requested_ids - known_ids)
+            if unknown_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=(
+                        "Unknown evaluation case IDs for "
+                        f"{request.suite}: {', '.join(unknown_ids)}."
+                    ),
+                )
+            cases = [case for case in suite_cases if case.case_id in requested_ids]
+            run_scope = "suite_subset"
+    else:
+        cases = request.cases
+        run_scope = "explicit_cases"
+
     if cases is None:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="No synthetic evaluation cases were selected.",
         )
 
-    try:
-        return await asyncio.wait_for(
-            EvalRunner(orchestrator).run(cases, suite=request.suite),
-            timeout=EVAL_RUN_TIMEOUT_SECONDS,
-        )
-    except TimeoutError as exc:
+    if not _eval_run_gate.acquire(blocking=False):
         raise HTTPException(
-            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-            detail="The evaluation run exceeded its safe time limit.",
-        ) from exc
+            status_code=status.HTTP_409_CONFLICT,
+            detail="An evaluation run is already in progress.",
+        )
+
+    try:
+        try:
+            return await asyncio.wait_for(
+                EvalRunner(orchestrator).run(
+                    cases,
+                    suite=request.suite,
+                    run_scope=run_scope,
+                    total_suite_case_count=total_suite_case_count,
+                ),
+                timeout=EVAL_RUN_TIMEOUT_SECONDS,
+            )
+        except TimeoutError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail="The evaluation run exceeded its safe time limit.",
+            ) from exc
+    finally:
+        _eval_run_gate.release()

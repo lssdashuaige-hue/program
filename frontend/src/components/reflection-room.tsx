@@ -6,6 +6,7 @@ import { MemoryCandidateCard } from "@/components/memory-candidate-card";
 import {
   type MemoryCandidate,
   type PersistenceResult,
+  type ResponsePreference,
   type SupportMode,
   sendReflection,
 } from "@/lib/api";
@@ -21,9 +22,15 @@ type FailedRequest = {
   messageId: string;
   content: string;
   clientTurnId: string;
+  responsePreference: ResponsePreference | null;
 };
 
 type RequestStatus = "idle" | "sending" | "stopping";
+
+type ComposerSnapshot = {
+  input: string;
+  responsePreference: ResponsePreference | null;
+};
 
 const opening: Message = {
   id: "opening",
@@ -35,6 +42,16 @@ const startingPrompts = [
   "最近有件事一直在我脑海里打转",
   "我正在一个选择之间犹豫",
   "一段关系让我反复有同样的感受",
+];
+
+const responsePreferences: Array<{
+  value: ResponsePreference;
+  label: string;
+}> = [
+  { value: "listen", label: "先听我说" },
+  { value: "organize", label: "帮我理清" },
+  { value: "explore_causes", label: "分析可能原因" },
+  { value: "next_step", label: "想一个下一步" },
 ];
 
 type Props = {
@@ -91,6 +108,8 @@ export function ReflectionRoom({
       : [opening],
   );
   const [input, setInput] = useState("");
+  const [responsePreference, setResponsePreference] =
+    useState<ResponsePreference | null>(null);
   const [requestStatus, setRequestStatus] = useState<RequestStatus>("idle");
   const [error, setError] = useState<string | null>(null);
   const [requestNotice, setRequestNotice] = useState<string | null>(null);
@@ -122,6 +141,8 @@ export function ReflectionRoom({
     message: string,
     messageId: string,
     clientTurnId: string,
+    preference: ResponsePreference | null,
+    composerSnapshot: ComposerSnapshot,
   ) {
     if (abortControllerRef.current) return;
 
@@ -139,6 +160,7 @@ export function ReflectionRoom({
       const result = await sendReflection(message, {
         clientTurnId,
         conversationId,
+        responsePreference: preference,
         signal: controller.signal,
       });
       const savedPersistence =
@@ -184,8 +206,14 @@ export function ReflectionRoom({
             : null,
       );
     } catch (caught) {
-      setInput((current) => (current.trim() ? current : message));
-      setFailedRequest({ messageId, content: message, clientTurnId });
+      setInput(composerSnapshot.input);
+      setResponsePreference(composerSnapshot.responsePreference);
+      setFailedRequest({
+        messageId,
+        content: message,
+        clientTurnId,
+        responsePreference: preference,
+      });
 
       if (caught instanceof Error && caught.name === "AbortError") {
         setRequestNotice(
@@ -204,12 +232,16 @@ export function ReflectionRoom({
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const message = input.trim();
-    if (!message || abortControllerRef.current) return;
+    if (!input.trim() || abortControllerRef.current) return;
+
+    const message = input;
+    const preference = responsePreference;
 
     const previousRequest = failedRequest;
     const retryingSameExpression =
-      previousRequest !== null && previousRequest.content === message;
+      previousRequest !== null &&
+      previousRequest.content === message &&
+      previousRequest.responsePreference === preference;
     const messageId = retryingSameExpression
       ? previousRequest.messageId
       : `user-${messageIdRef.current++}`;
@@ -217,6 +249,7 @@ export function ReflectionRoom({
       ? previousRequest.clientTurnId
       : crypto.randomUUID();
     setInput("");
+    setResponsePreference(null);
     setMessages((current) =>
       retryingSameExpression
         ? current.map((item) =>
@@ -224,18 +257,30 @@ export function ReflectionRoom({
             )
         : [...current, { id: messageId, role: "user", content: message }],
     );
-    await requestReflection(message, messageId, clientTurnId);
+    await requestReflection(message, messageId, clientTurnId, preference, {
+      input: message,
+      responsePreference: preference,
+    });
   }
 
   async function handleRetry() {
     if (!failedRequest || abortControllerRef.current) return;
 
     const request = failedRequest;
-    setInput((current) => (current.trim() === request.content ? "" : current));
+    const composerSnapshot = { input, responsePreference };
+    const composerIsRecoveredRequest =
+      input === request.content &&
+      responsePreference === request.responsePreference;
+    if (composerIsRecoveredRequest) {
+      setInput("");
+      setResponsePreference(null);
+    }
     await requestReflection(
       request.content,
       request.messageId,
       request.clientTurnId,
+      request.responsePreference,
+      composerSnapshot,
     );
   }
 
@@ -262,26 +307,28 @@ export function ReflectionRoom({
           </h1>
         </div>
       </header>
-      <section className="mb-7" aria-labelledby="starting-prompts-title">
-        <p
-          className="text-sm leading-6 text-[var(--muted)]"
-          id="starting-prompts-title"
-        >
-          如果一时不知道怎么开始，可以选一个起点，也可以直接跳过。
-        </p>
-        <div className="mt-3 flex flex-wrap gap-2">
-          {startingPrompts.map((prompt) => (
-            <button
-              className="rounded-full border border-[var(--line)] bg-[var(--surface)] px-4 py-2 text-left text-sm text-[var(--muted)] hover:text-[var(--ink)]"
-              key={prompt}
-              onClick={() => handleStartingPrompt(prompt)}
-              type="button"
-            >
-              {prompt}
-            </button>
-          ))}
-        </div>
-      </section>
+      {!conversationId && messages.length === 1 && input.length === 0 && (
+        <section className="mb-7" aria-labelledby="starting-prompts-title">
+          <p
+            className="text-sm leading-6 text-[var(--muted)]"
+            id="starting-prompts-title"
+          >
+            如果一时不知道怎么开始，可以选一个起点，也可以直接跳过。
+          </p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {startingPrompts.map((prompt) => (
+              <button
+                className="rounded-full border border-[var(--line)] bg-[var(--surface)] px-4 py-2 text-left text-sm text-[var(--muted)] hover:text-[var(--ink)]"
+                key={prompt}
+                onClick={() => handleStartingPrompt(prompt)}
+                type="button"
+              >
+                {prompt}
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
       <div className="flex flex-1 flex-col gap-4" aria-live="polite">
         {messages.map((message) => (
           <article
@@ -297,7 +344,7 @@ export function ReflectionRoom({
             >
               {message.role === "assistant" ? "PAS 的回应" : "你"}
             </p>
-            <p>{message.content}</p>
+            <p className="whitespace-pre-wrap break-words">{message.content}</p>
           </article>
         ))}
         {pending && (
@@ -359,9 +406,51 @@ export function ReflectionRoom({
         )}
       </div>
       <form className="sticky bottom-4 mt-8 rounded-[1.75rem] border border-[var(--line)] bg-[rgba(250,248,243,0.94)] p-3 shadow-[0_20px_60px_rgba(36,54,52,0.12)] backdrop-blur" onSubmit={handleSubmit}>
+        <fieldset
+          aria-describedby="response-preference-help"
+          className="px-2 pt-1"
+          disabled={pending}
+        >
+          <legend className="text-sm font-medium text-[var(--ink)]">
+            这一轮希望 PAS 怎么回应？
+            <span className="ml-1 font-normal text-[var(--muted)]">（可选）</span>
+          </legend>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {responsePreferences.map((preference) => {
+              const selected = responsePreference === preference.value;
+              return (
+                <button
+                  aria-pressed={selected}
+                  className={
+                    selected
+                      ? "min-h-11 rounded-full border border-[var(--ink)] bg-[var(--ink)] px-4 py-2 text-sm font-medium text-white outline-none focus-visible:ring-2 focus-visible:ring-[var(--ink)] focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                      : "min-h-11 rounded-full border border-[var(--line-strong)] bg-[var(--surface)] px-4 py-2 text-sm font-medium text-[var(--muted)] outline-none hover:text-[var(--ink)] focus-visible:ring-2 focus-visible:ring-[var(--ink)] focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                  }
+                  key={preference.value}
+                  onClick={() =>
+                    setResponsePreference((current) =>
+                      current === preference.value ? null : preference.value,
+                    )
+                  }
+                  type="button"
+                >
+                  <span aria-hidden="true">{selected ? "✓ " : ""}</span>
+                  {preference.label}
+                </button>
+              );
+            })}
+          </div>
+          <p
+            className="mt-2 text-xs leading-5 text-[var(--muted)]"
+            id="response-preference-help"
+          >
+            只影响这一轮的回应方式，不会改写你的文字；安全提醒仍会优先。
+          </p>
+        </fieldset>
         <label className="sr-only" htmlFor="reflection">写下此刻的想法</label>
         <textarea
-          className="min-h-24 w-full resize-none bg-transparent px-3 py-2 leading-7 outline-none placeholder:text-[var(--muted)]"
+          className="mt-2 min-h-24 w-full resize-none bg-transparent px-3 py-2 leading-7 outline-none placeholder:text-[var(--muted)] disabled:cursor-not-allowed disabled:opacity-60"
+          disabled={pending}
           id="reflection"
           maxLength={8000}
           onChange={(event) => setInput(event.target.value)}

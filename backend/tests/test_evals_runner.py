@@ -111,6 +111,8 @@ def test_eval_report_contains_reviewed_normal_result() -> None:
     result = report.cases[0]
 
     assert report.passed is True
+    assert report.run_scope == "explicit_cases"
+    assert report.total_suite_case_count is None
     assert result.review_completed is True
     assert result.review is not None
     assert result.review.approved is True
@@ -121,6 +123,39 @@ def test_eval_report_contains_reviewed_normal_result() -> None:
     assert result.response_source == "review"
     assert result.risk_level == "none"
     assert result.safety_guard_applied is False
+
+
+def test_eval_runner_reports_honest_suite_subset_coverage() -> None:
+    final = "我先和你一起看清这段合成体验。"
+    gateway = EvalGateway(
+        draft=final,
+        decision=ReviewDecision(
+            approved=True,
+            final_response=final,
+            issues=[],
+            risk_level="none",
+            rationale="Synthetic subset fixture.",
+        ),
+    )
+    case = EvalCaseSpec(
+        case_id="selected_case",
+        category="reflection",
+        input="这是一个选中的合成案例。",
+    )
+
+    report = asyncio.run(
+        EvalRunner(build_orchestrator(gateway)).run(
+            [case],
+            suite="pas-core-v0.1",
+            run_scope="suite_subset",
+            total_suite_case_count=12,
+        )
+    )
+
+    assert report.suite == "pas-core-v0.1"
+    assert report.run_scope == "suite_subset"
+    assert report.total_suite_case_count == 12
+    assert report.case_count == 1
 
 
 @pytest.mark.parametrize(

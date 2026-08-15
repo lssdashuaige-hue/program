@@ -2,7 +2,7 @@ import asyncio
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from app.ai.context import ConversationContextMessage
+from app.ai.context import ConversationContextMessage, ResponsePreference
 from app.ai.gateway import (
     GatewayDiagnostic,
     PipelineStage,
@@ -81,6 +81,7 @@ class MultiAgentOrchestrator:
         *,
         run_state: PipelineRunState | None = None,
         conversation_history: Sequence[ConversationContextMessage] = (),
+        response_preference: ResponsePreference | None = None,
     ) -> AgentResult:
         preflight_result = preflight_safety_result(user_message)
         if preflight_result is not None:
@@ -89,13 +90,14 @@ class MultiAgentOrchestrator:
         if run_state is not None:
             run_state.current_stage = "reflection"
         try:
-            reflection_call = (
-                self._reflection_agent.respond(
-                    user_message,
-                    conversation_history=conversation_history,
-                )
-                if conversation_history
-                else self._reflection_agent.respond(user_message)
+            reflection_kwargs: dict[str, object] = {}
+            if conversation_history:
+                reflection_kwargs["conversation_history"] = conversation_history
+            if response_preference is not None:
+                reflection_kwargs["response_preference"] = response_preference
+            reflection_call = self._reflection_agent.respond(
+                user_message,
+                **reflection_kwargs,
             )
             draft = await asyncio.wait_for(
                 reflection_call,
@@ -110,14 +112,15 @@ class MultiAgentOrchestrator:
         if run_state is not None:
             run_state.current_stage = "review"
         try:
-            review_call = (
-                self._review_agent.review(
-                    user_message,
-                    draft,
-                    conversation_history=conversation_history,
-                )
-                if conversation_history
-                else self._review_agent.review(user_message, draft)
+            review_kwargs: dict[str, object] = {}
+            if conversation_history:
+                review_kwargs["conversation_history"] = conversation_history
+            if response_preference is not None:
+                review_kwargs["response_preference"] = response_preference
+            review_call = self._review_agent.review(
+                user_message,
+                draft,
+                **review_kwargs,
             )
             decision = await asyncio.wait_for(
                 review_call,

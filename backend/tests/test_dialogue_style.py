@@ -127,6 +127,8 @@ def test_eval_runner_passes_synthetic_history_without_normalizing_its_text() -> 
     report = asyncio.run(EvalRunner(orchestrator).run([case], suite=None))
 
     assert report.case_count == 1
+    assert report.run_scope == "explicit_cases"
+    assert report.total_suite_case_count is None
     assert report.cases[0].conversation_history == case.conversation_history
     assert orchestrator.message == "脑子转bu动  但我知道要做什么"
     assert orchestrator.history == (

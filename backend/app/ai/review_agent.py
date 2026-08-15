@@ -1,6 +1,10 @@
 from collections.abc import Sequence
 
-from app.ai.context import ConversationContextMessage, review_input
+from app.ai.context import (
+    ConversationContextMessage,
+    ResponsePreference,
+    review_input,
+)
 from app.ai.gateway import LanguageModelGateway
 from app.ai.models import ReviewDecision
 
@@ -25,6 +29,7 @@ class ReviewAgent:
         reflection_draft: str,
         *,
         conversation_history: Sequence[ConversationContextMessage] = (),
+        response_preference: ResponsePreference | None = None,
     ) -> ReviewDecision:
         return await self._gateway.generate_structured(
             model=self._model,
@@ -33,6 +38,7 @@ class ReviewAgent:
                 user_message,
                 reflection_draft,
                 conversation_history,
+                response_preference,
             ),
             reasoning_effort=self._reasoning_effort,
             output_type=ReviewDecision,

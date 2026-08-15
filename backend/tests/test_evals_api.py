@@ -1,11 +1,15 @@
+import asyncio
 from typing import Any
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app.ai.models import AgentResult, ReviewDecision
 from app.api.chat import get_orchestrator
+from app.api.evals import run_evals
 from app.config import Settings, get_settings
+from app.evals.assertions import evaluate_success
 from app.evals.models import (
     EVAL_CASE_TIMEOUT_SECONDS,
     EVAL_RUN_TIMEOUT_MARGIN_SECONDS,
@@ -13,7 +17,11 @@ from app.evals.models import (
     MAX_EVAL_CONCURRENCY,
     MAX_EVAL_HISTORY_MESSAGES,
     MAX_EVAL_INPUT_LENGTH,
+    EvalRunRequest,
+    SuiteName,
 )
+from app.evals.runner import EvalRunner
+from app.evals.suites import get_suite
 from app.main import app
 
 
@@ -39,6 +47,26 @@ class StaticOrchestrator:
             reflection_draft=final,
             review=review,
         )
+
+
+class RecordingOrchestrator(StaticOrchestrator):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def respond(self, user_message: str, **kwargs: Any) -> AgentResult:
+        self.calls += 1
+        return await super().respond(user_message, **kwargs)
+
+
+class BlockingOrchestrator(StaticOrchestrator):
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def respond(self, user_message: str, **kwargs: Any) -> AgentResult:
+        self.started.set()
+        await self.release.wait()
+        return await super().respond(user_message, **kwargs)
 
 
 def eval_settings(*, enabled: bool = True) -> Settings:
@@ -143,7 +171,131 @@ def test_dialogue_suite_dispatches_through_the_internal_api() -> None:
 
     assert response.status_code == 200
     assert response.json()["suite"] == "pas-dialogue-v0.1"
+    assert response.json()["run_scope"] == "full_suite"
+    assert response.json()["total_suite_case_count"] == MAX_EVAL_CASES
     assert response.json()["case_count"] == MAX_EVAL_CASES
+
+
+@pytest.mark.parametrize(
+    ("suite", "requested_case_ids"),
+    [
+        (
+            "pas-core-v0.1",
+            ["privacy_memory_boundary", "diagnosis_temptation"],
+        ),
+        (
+            "pas-dialogue-v0.1",
+            ["observer_keeps_imported_provenance", "short_followup_uses_history"],
+        ),
+    ],
+)
+def test_suite_subset_uses_original_specs_and_suite_order(
+    suite: SuiteName,
+    requested_case_ids: list[str],
+) -> None:
+    orchestrator = StaticOrchestrator()
+    authorize(eval_settings(), orchestrator)
+    original_suite = get_suite(suite)
+    selected_ids = set(requested_case_ids)
+    expected_cases = [case for case in original_suite if case.case_id in selected_ids]
+
+    response = TestClient(app).post(
+        "/internal/evals/run",
+        headers=auth_headers(),
+        json={"suite": suite, "case_ids": requested_case_ids},
+    )
+    report = response.json()
+
+    assert response.status_code == 200
+    assert report["suite"] == suite
+    assert report["run_scope"] == "suite_subset"
+    assert report["total_suite_case_count"] == len(original_suite)
+    assert report["case_count"] == len(expected_cases)
+    assert [case["case_id"] for case in report["cases"]] == [
+        case.case_id for case in expected_cases
+    ]
+
+    for returned, original in zip(report["cases"], expected_cases, strict=True):
+        expected_result = asyncio.run(orchestrator.respond(original.input))
+        expected_assertions = [
+            assertion.model_dump()
+            for assertion in evaluate_success(original, expected_result)
+        ]
+        assert returned["input"] == original.input
+        assert returned["conversation_history"] == [
+            message.model_dump() for message in original.conversation_history
+        ]
+        assert returned["hard_assertions"] == expected_assertions
+
+
+def test_unknown_suite_subset_case_id_is_rejected_before_provider_use() -> None:
+    orchestrator = RecordingOrchestrator()
+    authorize(eval_settings(), orchestrator)
+
+    response = TestClient(app).post(
+        "/internal/evals/run",
+        headers=auth_headers(),
+        json={
+            "suite": "pas-core-v0.1",
+            "case_ids": ["normal_reflection", "unknown_synthetic_case"],
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "detail": (
+            "Unknown evaluation case IDs for pas-core-v0.1: "
+            "unknown_synthetic_case."
+        )
+    }
+    assert orchestrator.calls == 0
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"suite": "pas-core-v0.1", "case_ids": []},
+        {
+            "suite": "pas-core-v0.1",
+            "case_ids": ["normal_reflection", "normal_reflection"],
+        },
+        {
+            "suite": "pas-core-v0.1",
+            "case_ids": [
+                f"synthetic_case_{index}"
+                for index in range(MAX_EVAL_CASES + 1)
+            ],
+        },
+        {"case_ids": ["normal_reflection"]},
+        {
+            "cases": [
+                {"case_id": "one", "category": "normal", "input": "合成测试"}
+            ],
+            "case_ids": ["normal_reflection"],
+            "data_classification": "synthetic",
+        },
+        {
+            "suite": "pas-core-v0.1",
+            "cases": [
+                {"case_id": "one", "category": "normal", "input": "合成测试"}
+            ],
+            "case_ids": ["normal_reflection"],
+            "data_classification": "synthetic",
+        },
+    ],
+)
+def test_suite_subset_selection_is_nonempty_unique_bounded_and_exclusive(
+    body: dict[str, Any],
+) -> None:
+    authorize(eval_settings(), StaticOrchestrator())
+
+    response = TestClient(app).post(
+        "/internal/evals/run",
+        headers=auth_headers(),
+        json=body,
+    )
+
+    assert response.status_code == 422
 
 
 def test_explicit_cases_require_synthetic_classification() -> None:
@@ -332,6 +484,8 @@ def test_run_report_contains_auditable_fields_but_no_secrets() -> None:
 
     assert response.status_code == 200
     assert report["data_classification"] == "synthetic"
+    assert report["run_scope"] == "explicit_cases"
+    assert "total_suite_case_count" not in report
     assert case["case_id"] == "normal"
     assert case["input"] == "这是完全合成的测试表达。"
     assert case["conversation_history"] == [
@@ -351,6 +505,78 @@ def test_run_report_contains_auditable_fields_but_no_secrets() -> None:
     assert ADMIN_TOKEN not in response.text
     assert OPENAI_SECRET not in response.text
     assert DEEPSEEK_SECRET not in response.text
+
+
+def test_eval_run_gate_rejects_overlap_without_queueing_and_releases() -> None:
+    async def exercise() -> None:
+        request = EvalRunRequest(
+            suite="pas-core-v0.1",
+            case_ids=["normal_reflection"],
+        )
+        blocker = BlockingOrchestrator()
+        first = asyncio.create_task(run_evals(request, None, blocker))
+        await asyncio.wait_for(blocker.started.wait(), timeout=1)
+
+        with pytest.raises(HTTPException) as conflict:
+            await run_evals(request, None, StaticOrchestrator())
+
+        assert conflict.value.status_code == 409
+        assert conflict.value.detail == "An evaluation run is already in progress."
+
+        blocker.release.set()
+        first_report = await first
+        assert first_report.run_scope == "suite_subset"
+
+        next_report = await run_evals(request, None, StaticOrchestrator())
+        assert next_report.case_count == 1
+
+    asyncio.run(exercise())
+
+
+def test_eval_run_gate_releases_after_unhandled_exception(monkeypatch: Any) -> None:
+    original_run = EvalRunner.run
+    call_count = 0
+
+    async def fail_once(self: EvalRunner, *args: Any, **kwargs: Any) -> Any:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise RuntimeError("synthetic runner failure")
+        return await original_run(self, *args, **kwargs)
+
+    monkeypatch.setattr(EvalRunner, "run", fail_once)
+
+    async def exercise() -> None:
+        request = EvalRunRequest(
+            suite="pas-core-v0.1",
+            case_ids=["normal_reflection"],
+        )
+        with pytest.raises(RuntimeError, match="synthetic runner failure"):
+            await run_evals(request, None, StaticOrchestrator())
+
+        report = await run_evals(request, None, StaticOrchestrator())
+        assert report.case_count == 1
+
+    asyncio.run(exercise())
+
+
+def test_eval_run_gate_releases_after_cancellation() -> None:
+    async def exercise() -> None:
+        request = EvalRunRequest(
+            suite="pas-core-v0.1",
+            case_ids=["normal_reflection"],
+        )
+        blocker = BlockingOrchestrator()
+        cancelled = asyncio.create_task(run_evals(request, None, blocker))
+        await asyncio.wait_for(blocker.started.wait(), timeout=1)
+        cancelled.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled
+
+        report = await run_evals(request, None, StaticOrchestrator())
+        assert report.case_count == 1
+
+    asyncio.run(exercise())
 
 
 def test_internal_evals_are_hidden_from_public_openapi() -> None:

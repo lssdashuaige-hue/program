@@ -71,7 +71,20 @@ deterministic assertions.
 The evaluation API is disabled by default. To enable it locally, set
 `PAS_EVALS_ENABLED=true` and a unique `PAS_EVALS_ADMIN_TOKEN` of at least 24
 characters in `backend/.env`. The page accepts this evaluation token only in
-memory. It never accepts an OpenAI, DeepSeek, or other provider API key.
+memory. It can run either the core or dialogue suite, retain a completed full
+attempt while explicitly rerunning retryable infrastructure failures, and
+export/import a versioned JSON report. The report never contains the evaluation
+token. It never accepts an OpenAI, DeepSeek, or other provider API key.
+
+The report distinguishes the first complete suite run from later subset
+attempts; a combined coverage view is not presented as a clean first-pass run.
+Imported JSON is explicitly marked as unsigned and structure-validated only;
+it cannot be used to trigger subset reruns or presented as a live acceptance
+result. A live report keeps at most 12 explicit retry attempts.
+The local Alpha backend also rejects overlapping evaluation runs within one
+process. This is a cost and stability guard, not a multi-worker production job
+queue. In-progress synchronous runs cannot be recovered after the connection or
+page is closed.
 
 Evaluation runs use the model provider already selected by the backend and can
 incur provider usage. Use synthetic cases only. Do not paste real user

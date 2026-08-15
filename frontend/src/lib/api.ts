@@ -10,6 +10,12 @@ export type MemoryCandidate = {
 
 export type SupportMode = "reflection" | "support";
 
+export type ResponsePreference =
+  | "listen"
+  | "organize"
+  | "explore_causes"
+  | "next_step";
+
 export type ResponseSource =
   | "review"
   | "safety_guard"
@@ -50,6 +56,7 @@ const apiUrl = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000").repl
 type SendReflectionOptions = {
   clientTurnId: string;
   conversationId: string | null;
+  responsePreference?: ResponsePreference | null;
   signal?: AbortSignal;
 };
 
@@ -162,6 +169,7 @@ export async function sendReflection(
       message,
       conversation_id: options.conversationId ?? undefined,
       client_turn_id: options.clientTurnId,
+      response_preference: options.responsePreference ?? undefined,
     }),
     signal: options.signal,
   });
