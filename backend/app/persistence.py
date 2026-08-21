@@ -5,7 +5,7 @@ from uuid import UUID, uuid4
 
 import httpx
 from fastapi import Depends, HTTPException, status
-from pydantic import BaseModel, SecretStr
+from pydantic import BaseModel, Field, SecretStr
 
 from app.auth import AuthenticatedUser
 from app.config import Settings, get_settings
@@ -20,6 +20,27 @@ MessageRole = Literal["user", "assistant", "system"]
 StoredResponseSource = Literal["review"]
 StoredSupportMode = Literal["reflection"]
 StoredRiskLevel = Literal["none"]
+StoredReviewContractVersion = Literal["legacy", "2"]
+StoredVerificationContractVersion = Literal["legacy", "1", "2"]
+StoredBoundedResponseKind = Literal[
+    "third_party_private_state",
+    "single_chat_diagnostic_request",
+    "personal_lifespan_conversion",
+    "unavailable_cross_chat_context",
+]
+CURRENT_REVIEW_CONTRACT_VERSION: Literal["2"] = "2"
+CURRENT_VERIFICATION_CONTRACT_VERSION: Literal["2"] = "2"
+PUBLIC_MESSAGE_SELECT = (
+    "id,conversation_id,client_turn_id,role,content,"
+    "response_source,support_mode,risk_level,created_at"
+)
+PRIVATE_MESSAGE_SELECT = (
+    "id,conversation_id,user_id,client_turn_id,role,content,"
+    "response_source,support_mode,risk_level,"
+    "review_contract_version,verification_contract_version,"
+    "bounded_response_kind,created_at"
+)
+OWNED_TURN_LOCATOR_SELECT = "conversation_id,client_turn_id,role"
 
 
 class PersistenceUnavailable(RuntimeError):
@@ -35,7 +56,7 @@ class PersistenceConflict(RuntimeError):
 
 
 class PersistenceNotAllowed(RuntimeError):
-    """Raised when a non-reviewed or support response is offered for storage."""
+    """Raised when a response lacks the current durable release provenance."""
 
 
 class ResourceNotFound(RuntimeError):
@@ -59,7 +80,33 @@ class MessageRecord(BaseModel):
     response_source: StoredResponseSource | None = None
     support_mode: StoredSupportMode | None = None
     risk_level: StoredRiskLevel | None = None
+    review_contract_version: StoredReviewContractVersion | None = Field(
+        default=None,
+        exclude=True,
+    )
+    verification_contract_version: StoredVerificationContractVersion | None = Field(
+        default=None,
+        exclude=True,
+    )
+    bounded_response_kind: StoredBoundedResponseKind | None = Field(
+        default=None,
+        exclude=True,
+    )
     created_at: datetime
+
+
+class PrivateMessageRecord(MessageRecord):
+    """Server-only message shape used to validate durable release provenance."""
+
+    user_id: UUID = Field(exclude=True)
+
+
+class OwnedTurnLocator(BaseModel):
+    """Public-column projection used only to prove ownership through RLS."""
+
+    conversation_id: UUID
+    client_turn_id: UUID
+    role: MessageRole
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,18 +124,32 @@ def should_persist_response(
     response_source: str,
     support_mode: str,
     risk_level: str | None,
+    review_contract_version: str,
+    verification_contract_version: str,
+    bounded_response_kind: str | None,
 ) -> bool:
-    """Return true only for a normal public response completed by Review."""
+    """Return true only for a normal response released by both current gates."""
 
     return (
         response_source == "review"
         and support_mode == "reflection"
         and risk_level == "none"
+        and review_contract_version == CURRENT_REVIEW_CONTRACT_VERSION
+        and verification_contract_version
+        == CURRENT_VERIFICATION_CONTRACT_VERSION
+        and bounded_response_kind
+        in {
+            None,
+            "third_party_private_state",
+            "single_chat_diagnostic_request",
+            "personal_lifespan_conversion",
+            "unavailable_cross_chat_context",
+        }
     )
 
 
 class SupabasePersistence:
-    """RLS-scoped user access plus one narrow server-only reviewed-turn write."""
+    """RLS-scoped public reads plus narrow server-only provenance access."""
 
     def __init__(
         self,
@@ -144,12 +205,16 @@ class SupabasePersistence:
         client_turn_id: UUID,
         user_message: str,
         final_response: str,
+        review_contract_version: Literal["2"],
+        verification_contract_version: Literal["2"],
+        bounded_response_kind: StoredBoundedResponseKind | None,
     ) -> httpx.Response:
         """Insert one public reviewed turn with the server-only credential.
 
         This deliberately narrow method accepts only the two public message
-        strings. Agent drafts, Review rationale, and memory decisions cannot be
-        passed through this boundary.
+        strings and their release provenance scalars. Agent drafts, Review
+        rationale, verification rationale, and memory decisions cannot cross
+        this boundary.
         """
 
         created_at = datetime.now(timezone.utc)
@@ -163,6 +228,9 @@ class SupabasePersistence:
                 "response_source": None,
                 "support_mode": None,
                 "risk_level": None,
+                "review_contract_version": None,
+                "verification_contract_version": None,
+                "bounded_response_kind": None,
                 "created_at": created_at.isoformat(),
             },
             {
@@ -174,6 +242,9 @@ class SupabasePersistence:
                 "response_source": "review",
                 "support_mode": "reflection",
                 "risk_level": "none",
+                "review_contract_version": review_contract_version,
+                "verification_contract_version": verification_contract_version,
+                "bounded_response_kind": bounded_response_kind,
                 "created_at": (created_at + timedelta(microseconds=1)).isoformat(),
             },
         ]
@@ -230,6 +301,83 @@ class SupabasePersistence:
                 "Supabase persistence could not be reached."
             ) from error
 
+    async def _read_private_messages(
+        self,
+        *,
+        user: AuthenticatedUser,
+        conversation_id: UUID,
+        client_turn_id: UUID | None = None,
+        context_only: bool = False,
+    ) -> list[PrivateMessageRecord]:
+        """Read provenance only after an RLS-scoped ownership check.
+
+        This is deliberately not a general service-role request method. It can
+        read only messages for one already-verified user and conversation, and
+        it always uses an explicit private projection.
+        """
+
+        if context_only == (client_turn_id is not None):
+            raise ValueError(
+                "A private message read must be either context or one saved turn."
+            )
+
+        params: dict[str, str | int] = {
+            "select": PRIVATE_MESSAGE_SELECT,
+            "conversation_id": f"eq.{conversation_id}",
+            "user_id": f"eq.{user.id}",
+            "client_turn_id": "not.is.null",
+        }
+        if context_only:
+            params.update(
+                {
+                    "role": "in.(user,assistant)",
+                    "order": "created_at.desc,role.asc,id.desc",
+                    "limit": MAX_CONTEXT_MESSAGES,
+                }
+            )
+        else:
+            params.update(
+                {
+                    "client_turn_id": f"eq.{client_turn_id}",
+                    "order": "role.desc,id.asc",
+                    "limit": 3,
+                }
+            )
+
+        try:
+            async with httpx.AsyncClient(
+                timeout=PERSISTENCE_REQUEST_TIMEOUT_SECONDS,
+                transport=self._transport,
+            ) as client:
+                response = await client.get(
+                    f"{self._supabase_url}/rest/v1/messages",
+                    headers=self._secret_headers(),
+                    params=params,
+                )
+        except httpx.RequestError as error:
+            raise PersistenceUnavailable(
+                "Supabase could not read private message provenance."
+            ) from error
+
+        if response.status_code != status.HTTP_200_OK:
+            raise PersistenceUnavailable(
+                "Supabase rejected the private message provenance read."
+            )
+        rows = self._parse_rows(response, PrivateMessageRecord)
+        if any(
+            row.user_id != user.id
+            or row.conversation_id != conversation_id
+            or (
+                client_turn_id is not None
+                and row.client_turn_id != client_turn_id
+            )
+            for row in rows
+        ):
+            raise PersistenceConflict(
+                "The private message read crossed its verified ownership scope."
+            )
+        return rows
+
     @staticmethod
     def _validate_status(
         response: httpx.Response,
@@ -268,7 +416,66 @@ class SupabasePersistence:
     @staticmethod
     def _complete_reviewed_turn_messages(
         messages: list[MessageRecord],
+        *,
+        current_contracts_only: bool = False,
     ) -> list[MessageRecord]:
+        grouped: dict[UUID, list[MessageRecord]] = {}
+        for message in messages:
+            if message.client_turn_id is None:
+                continue
+            grouped.setdefault(message.client_turn_id, []).append(message)
+
+        reviewed: list[MessageRecord] = []
+        for group in grouped.values():
+            user_messages = [item for item in group if item.role == "user"]
+            assistant_messages = [item for item in group if item.role == "assistant"]
+            if len(group) != 2 or len(user_messages) != 1 or len(assistant_messages) != 1:
+                continue
+            user_message = user_messages[0]
+            assistant_message = assistant_messages[0]
+            if (
+                user_message.conversation_id != assistant_message.conversation_id
+                or user_message.response_source is not None
+                or user_message.support_mode is not None
+                or user_message.risk_level is not None
+                or user_message.review_contract_version is not None
+                or user_message.verification_contract_version is not None
+                or user_message.bounded_response_kind is not None
+                or assistant_message.response_source != "review"
+                or assistant_message.support_mode != "reflection"
+                or assistant_message.risk_level != "none"
+            ):
+                continue
+            current_contracts = (
+                assistant_message.review_contract_version
+                == CURRENT_REVIEW_CONTRACT_VERSION
+                and assistant_message.verification_contract_version
+                == CURRENT_VERIFICATION_CONTRACT_VERSION
+            )
+            legacy_contracts = (
+                (
+                    assistant_message.review_contract_version == "legacy"
+                    and assistant_message.verification_contract_version == "legacy"
+                    and assistant_message.bounded_response_kind is None
+                )
+                or (
+                    assistant_message.review_contract_version == "2"
+                    and assistant_message.verification_contract_version == "1"
+                )
+            )
+            if not current_contracts and (
+                current_contracts_only or not legacy_contracts
+            ):
+                continue
+            reviewed.extend((user_message, assistant_message))
+        return reviewed
+
+    @staticmethod
+    def _complete_public_reviewed_turn_messages(
+        messages: list[MessageRecord],
+    ) -> list[MessageRecord]:
+        """Keep complete public pairs after the database enforced provenance."""
+
         grouped: dict[UUID, list[MessageRecord]] = {}
         for message in messages:
             if message.client_turn_id is None:
@@ -295,6 +502,37 @@ class SupabasePersistence:
                 continue
             reviewed.extend((user_message, assistant_message))
         return reviewed
+
+    async def _locate_owned_turn_conversation(
+        self,
+        user: AuthenticatedUser,
+        client_turn_id: UUID,
+    ) -> UUID | None:
+        """Use the user's token and RLS to locate an owned durable turn."""
+
+        response = await self._request(
+            "GET",
+            "messages",
+            access_token=user.access_token,
+            params={
+                "select": OWNED_TURN_LOCATOR_SELECT,
+                "client_turn_id": f"eq.{client_turn_id}",
+                "order": "role.desc",
+                "limit": 3,
+            },
+        )
+        self._validate_status(response, allowed={status.HTTP_200_OK})
+        locators = self._parse_rows(response, OwnedTurnLocator)
+        if not locators:
+            return None
+        if any(item.client_turn_id != client_turn_id for item in locators):
+            raise PersistenceConflict("The durable turn lookup returned another turn.")
+        conversation_ids = {item.conversation_id for item in locators}
+        if len(conversation_ids) != 1:
+            raise PersistenceConflict(
+                "The client turn ID belongs to multiple conversations."
+            )
+        return next(iter(conversation_ids))
 
     @staticmethod
     def _saved_turn_from_rows(
@@ -343,12 +581,19 @@ class SupabasePersistence:
             user_message.response_source is not None
             or user_message.support_mode is not None
             or user_message.risk_level is not None
+            or user_message.review_contract_version is not None
+            or user_message.verification_contract_version is not None
+            or user_message.bounded_response_kind is not None
             or assistant_message.response_source != "review"
             or assistant_message.support_mode != "reflection"
             or assistant_message.risk_level != "none"
+            or assistant_message.review_contract_version
+            != CURRENT_REVIEW_CONTRACT_VERSION
+            or assistant_message.verification_contract_version
+            != CURRENT_VERIFICATION_CONTRACT_VERSION
         ):
             raise PersistenceConflict(
-                "The existing turn is not a normal reviewed response."
+                "The existing turn did not pass the current release contracts."
             )
 
         return SavedReviewedTurn(
@@ -534,19 +779,15 @@ class SupabasePersistence:
             "messages",
             access_token=user.access_token,
             params={
-                "select": (
-                    "id,conversation_id,client_turn_id,role,content,"
-                    "response_source,support_mode,risk_level,created_at"
-                ),
+                "select": PUBLIC_MESSAGE_SELECT,
                 "conversation_id": f"eq.{conversation_id}",
-                "user_id": f"eq.{user.id}",
                 "client_turn_id": "not.is.null",
                 "order": "created_at.desc,role.asc,id.desc",
                 "limit": MAX_HISTORY_MESSAGES,
             },
         )
         self._validate_status(response, allowed={status.HTTP_200_OK})
-        reviewed = self._complete_reviewed_turn_messages(
+        reviewed = self._complete_public_reviewed_turn_messages(
             self._parse_rows(response, MessageRecord)
         )
         newest_pairs = [
@@ -566,26 +807,17 @@ class SupabasePersistence:
     ) -> list[MessageRecord]:
         """Load only the newest reviewed turn context needed by the agents."""
 
-        response = await self._request(
-            "GET",
-            "messages",
-            access_token=user.access_token,
-            params={
-                "select": (
-                    "id,conversation_id,client_turn_id,role,content,"
-                    "response_source,support_mode,risk_level,created_at"
-                ),
-                "conversation_id": f"eq.{conversation_id}",
-                "user_id": f"eq.{user.id}",
-                "client_turn_id": "not.is.null",
-                "role": "in.(user,assistant)",
-                "order": "created_at.desc,role.asc,id.desc",
-                "limit": MAX_CONTEXT_MESSAGES,
-            },
+        self._secret_headers()
+        if await self.get_conversation(user, conversation_id) is None:
+            raise ResourceNotFound("Conversation not found.")
+        rows = await self._read_private_messages(
+            user=user,
+            conversation_id=conversation_id,
+            context_only=True,
         )
-        self._validate_status(response, allowed={status.HTTP_200_OK})
         newest_first = self._complete_reviewed_turn_messages(
-            list(reversed(self._parse_rows(response, MessageRecord)))
+            list(reversed(rows)),
+            current_contracts_only=True,
         )
         newest_first = list(reversed(newest_first))
         chronological = list(reversed(newest_first))
@@ -619,40 +851,41 @@ class SupabasePersistence:
         user_content: str,
         conversation_id: UUID | None = None,
     ) -> SavedReviewedTurn | None:
+        self._secret_headers()
         if (
             conversation_id is not None
             and await self.get_conversation(user, conversation_id) is None
         ):
             raise ResourceNotFound("Conversation not found.")
 
-        params: dict[str, str] = {
-            "select": (
-                "id,conversation_id,client_turn_id,role,content,"
-                "response_source,support_mode,risk_level,created_at"
-            ),
-            "client_turn_id": f"eq.{client_turn_id}",
-            "user_id": f"eq.{user.id}",
-            "order": "role.desc,id.asc",
-        }
-        if conversation_id is not None:
-            params["conversation_id"] = f"eq.{conversation_id}"
-
-        response = await self._request(
-            "GET",
-            "messages",
-            access_token=user.access_token,
-            params=params,
+        owned_conversation_id = await self._locate_owned_turn_conversation(
+            user,
+            client_turn_id,
         )
-        self._validate_status(response, allowed={status.HTTP_200_OK})
-        rows = self._parse_rows(response, MessageRecord)
-        if not rows:
+        if owned_conversation_id is None:
             return None
+        if (
+            conversation_id is not None
+            and owned_conversation_id != conversation_id
+        ):
+            raise PersistenceConflict(
+                "The durable turn does not belong to the expected conversation."
+            )
+        rows = await self._read_private_messages(
+            user=user,
+            conversation_id=owned_conversation_id,
+            client_turn_id=client_turn_id,
+        )
+        if not rows:
+            raise PersistenceConflict(
+                "The owned durable turn disappeared before provenance validation."
+            )
 
         return self._saved_turn_from_rows(
             rows,
             client_turn_id=client_turn_id,
             user_content=user_content,
-            conversation_id=conversation_id,
+            conversation_id=owned_conversation_id,
             already_saved=True,
         )
 
@@ -666,18 +899,25 @@ class SupabasePersistence:
         response_source: str,
         support_mode: str,
         risk_level: str | None,
+        review_contract_version: Literal["2"],
+        verification_contract_version: Literal["2"],
+        bounded_response_kind: StoredBoundedResponseKind | None,
         conversation_id: UUID | None = None,
         conversation_title: str | None = None,
     ) -> SavedReviewedTurn:
-        """Persist exactly one normal Review-approved public conversation turn."""
+        """Persist exactly one normal dual-gate-released public turn."""
 
         if not should_persist_response(
             response_source=response_source,
             support_mode=support_mode,
             risk_level=risk_level,
+            review_contract_version=review_contract_version,
+            verification_contract_version=verification_contract_version,
+            bounded_response_kind=bounded_response_kind,
         ):
             raise PersistenceNotAllowed(
-                "Only a normal Review-approved response may be persisted."
+                "Only a response released by the current Review and verification "
+                "contracts may be persisted."
             )
 
         existing = await self.get_saved_turn(
@@ -729,6 +969,9 @@ class SupabasePersistence:
                 client_turn_id=client_turn_id,
                 user_message=user_message,
                 final_response=final_response,
+                review_contract_version=review_contract_version,
+                verification_contract_version=verification_contract_version,
+                bounded_response_kind=bounded_response_kind,
             )
             if response.status_code == status.HTTP_409_CONFLICT:
                 winner = await self.get_saved_turn(

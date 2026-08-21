@@ -1,0 +1,149 @@
+import re
+from pathlib import Path
+
+
+MIGRATION = (
+    Path(__file__).resolve().parents[2]
+    / "database"
+    / "migrations"
+    / "0006_dual_gate_message_provenance.sql"
+)
+
+
+def test_dual_gate_migration_backfills_existing_turns_as_legacy() -> None:
+    sql = MIGRATION.read_text(encoding="utf-8").lower()
+
+    assert "add column if not exists review_contract_version text" in sql
+    assert "add column if not exists verification_contract_version text" in sql
+    assert "add column if not exists bounded_response_kind text" in sql
+    assert "review_contract_version = 'legacy'" in sql
+    assert "verification_contract_version = 'legacy'" in sql
+    assert "review_contract_version is null" in sql
+    assert "verification_contract_version is null" in sql
+
+
+def test_dual_gate_shape_is_null_safe_and_limits_current_bounded_kinds() -> None:
+    sql = MIGRATION.read_text(encoding="utf-8").lower()
+
+    for comparison in (
+        "response_source is not distinct from 'review'",
+        "support_mode is not distinct from 'reflection'",
+        "risk_level is not distinct from 'none'",
+        "review_contract_version is not distinct from '2'",
+        # v1 is retained only as historical provenance; v2 is current.
+        "verification_contract_version is not distinct from '1'",
+        "verification_contract_version is not distinct from '2'",
+    ):
+        assert comparison in sql
+
+    for bounded_kind in (
+        "third_party_private_state",
+        "single_chat_diagnostic_request",
+        "personal_lifespan_conversion",
+        "unavailable_cross_chat_context",
+    ):
+        assert f"'{bounded_kind}'" in sql
+
+    # User and system rows must never carry release provenance.
+    assert sql.count("and review_contract_version is null") >= 4
+    assert sql.count("and verification_contract_version is null") >= 4
+    assert sql.count("and bounded_response_kind is null") >= 3
+
+
+def test_cross_chat_bounded_kind_exists_only_in_the_current_v2_pair() -> None:
+    sql = MIGRATION.read_text(encoding="utf-8").lower()
+
+    def kinds_for_verifier(version: str) -> set[str]:
+        match = re.search(
+            r"review_contract_version is not distinct from '2'\s+"
+            rf"and verification_contract_version is not distinct from '{version}'\s+"
+            r"and\s*\(\s*bounded_response_kind is null\s+"
+            r"or bounded_response_kind in\s*\((?P<kinds>[^)]*)\)",
+            sql,
+            flags=re.DOTALL,
+        )
+        assert match is not None
+        return {
+            item.strip().strip("'")
+            for item in match.group("kinds").split(",")
+        }
+
+    legacy_kinds = kinds_for_verifier("1")
+    current_kinds = kinds_for_verifier("2")
+    assert legacy_kinds == {
+        "third_party_private_state",
+        "single_chat_diagnostic_request",
+        "personal_lifespan_conversion",
+    }
+    assert current_kinds == legacy_kinds | {"unavailable_cross_chat_context"}
+
+
+def test_authenticated_reads_only_the_public_message_projection() -> None:
+    sql = MIGRATION.read_text(encoding="utf-8").lower()
+
+    assert (
+        "revoke select on table public.messages from anon, authenticated;"
+        in sql
+    )
+    private_revoke = re.search(
+        r"revoke\s+select\s*\((?P<columns>.*?)\)\s*"
+        r"on\s+table\s+public\.messages\s+from\s+anon,\s*authenticated\s*;",
+        sql,
+        flags=re.DOTALL,
+    )
+    assert private_revoke is not None
+    assert {
+        column.strip()
+        for column in private_revoke.group("columns").split(",")
+    } == {
+        "review_contract_version",
+        "verification_contract_version",
+        "bounded_response_kind",
+    }
+    assert re.search(
+        r"grant\s+select\s+on\s+table\s+public\.messages\s+to\s+authenticated",
+        sql,
+    ) is None
+    assert re.search(
+        r"grant\s+all(?:\s+privileges)?\s+on\s+(?:table\s+)?"
+        r"public\.messages\s+to\s+authenticated",
+        sql,
+    ) is None
+    match = re.search(
+        r"grant\s+select\s*\((?P<columns>.*?)\)\s*"
+        r"on\s+table\s+public\.messages\s+to\s+authenticated\s*;",
+        sql,
+        flags=re.DOTALL,
+    )
+    assert match is not None
+    granted_columns = {
+        column.strip()
+        for column in match.group("columns").split(",")
+    }
+    assert granted_columns == {
+        "id",
+        "conversation_id",
+        "client_turn_id",
+        "role",
+        "content",
+        "response_source",
+        "support_mode",
+        "risk_level",
+        "created_at",
+    }
+    assert granted_columns.isdisjoint(
+        {
+            "review_contract_version",
+            "verification_contract_version",
+            "bounded_response_kind",
+        }
+    )
+
+
+def test_server_permissions_and_existing_rls_policy_are_preserved() -> None:
+    sql = MIGRATION.read_text(encoding="utf-8").lower()
+
+    assert "grant select, insert on table public.messages to service_role;" in sql
+    assert "row level security" not in sql
+    assert "create policy" not in sql
+    assert "drop policy" not in sql

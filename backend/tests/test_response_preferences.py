@@ -11,7 +11,12 @@ from app.ai.context import (
     RESPONSE_PREFERENCE_GUIDANCE,
     ResponsePreference,
 )
-from app.ai.models import AgentResult, MemoryDecision, ReviewDecision
+from app.ai.models import (
+    AgentResult,
+    FinalVerificationDecision,
+    MemoryDecision,
+    ReviewDecision,
+)
 from app.ai.orchestrator import MultiAgentOrchestrator
 from app.ai.reflection_agent import ReflectionAgent
 from app.ai.review_agent import ReviewAgent
@@ -19,6 +24,7 @@ from app.api.chat import get_orchestrator
 from app.auth import AuthenticatedUser
 from app.main import app
 from app.persistence import SavedReviewedTurn, get_optional_persistence
+from tests.review_fixtures import review_decision, verification_decision
 
 
 PREFERENCES = tuple(RESPONSE_PREFERENCE_GUIDANCE)
@@ -26,11 +32,10 @@ PREFERENCES = tuple(RESPONSE_PREFERENCE_GUIDANCE)
 
 def reviewed_result() -> AgentResult:
     final_response = "这是 Review 后的最终回应。"
-    review = ReviewDecision(
-        approved=True,
+    review = review_decision(
+        draft_disposition="rewritten",
+        draft_findings=["pas_principle_violation"],
         final_response=final_response,
-        issues=[],
-        risk_level="none",
         rationale="The result is safe and preserves the user's wording.",
     )
     return AgentResult(
@@ -41,6 +46,7 @@ def reviewed_result() -> AgentResult:
         risk_level="none",
         reflection_draft="仅供 Review 的草稿。",
         review=review,
+        verification=verification_decision(final_response),
     )
 
 
@@ -52,13 +58,16 @@ class CapturingGateway:
         self.calls.append(("reflection", kwargs))
         return "一种暂定的 Reflection 草稿。"
 
-    async def generate_structured(self, **kwargs: Any) -> ReviewDecision:
+    async def generate_structured(self, **kwargs: Any) -> Any:
+        if kwargs["output_type"] is FinalVerificationDecision:
+            self.calls.append(("review_verifier", kwargs))
+            candidate = json.loads(kwargs["user_input"])["candidate_response"]
+            return verification_decision(candidate)
         self.calls.append(("review", kwargs))
-        return ReviewDecision(
-            approved=True,
+        return review_decision(
+            draft_disposition="rewritten",
+            draft_findings=["pas_principle_violation"],
             final_response="这是 Review 后的最终回应。",
-            issues=[],
-            risk_level="none",
             rationale="The preference remains a soft style target.",
         )
 
@@ -320,6 +329,9 @@ def test_persistence_saves_only_the_raw_message_not_the_preference(
         "response_source": "review",
         "support_mode": "reflection",
         "risk_level": "none",
+        "review_contract_version": "2",
+        "verification_contract_version": "2",
+        "bounded_response_kind": None,
         "conversation_id": None,
         "conversation_title": "用户实际原文 不要改写",
     }

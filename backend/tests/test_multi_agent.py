@@ -7,12 +7,13 @@ from fastapi.testclient import TestClient
 
 import app.api.chat as chat_api
 from app.ai.context import ConversationContextMessage
-from app.ai.models import ReviewDecision
+from app.ai.models import FinalVerificationDecision, ReviewDecision
 from app.ai.orchestrator import AgentPipelineError, MultiAgentOrchestrator
 from app.ai.reflection_agent import ReflectionAgent
 from app.ai.review_agent import ReviewAgent
 from app.api.chat import get_orchestrator
 from app.main import app
+from tests.review_fixtures import review_decision, verification_decision
 
 
 class FakeGateway:
@@ -33,6 +34,10 @@ class FakeGateway:
         return self.draft
 
     async def generate_structured(self, **kwargs: Any) -> ReviewDecision:
+        if kwargs["output_type"] is FinalVerificationDecision:
+            self.calls.append(("review_verifier", kwargs))
+            candidate = json.loads(kwargs["user_input"])["candidate_response"]
+            return verification_decision(candidate)  # type: ignore[return-value]
         self.calls.append(("review", kwargs))
         if self.fail_review:
             raise RuntimeError("review unavailable")
@@ -64,6 +69,10 @@ class DelayedGateway(FakeGateway):
         return self.draft
 
     async def generate_structured(self, **kwargs: Any) -> ReviewDecision:
+        if kwargs["output_type"] is FinalVerificationDecision:
+            self.calls.append(("review_verifier", kwargs))
+            candidate = json.loads(kwargs["user_input"])["candidate_response"]
+            return verification_decision(candidate)  # type: ignore[return-value]
         self.calls.append(("review", kwargs))
         await asyncio.sleep(self.review_delay)
         assert self.decision is not None
@@ -94,11 +103,8 @@ def build_orchestrator(
 def test_review_agent_can_approve_draft() -> None:
     gateway = FakeGateway(
         draft="你似乎很累。哪一种疲惫最接近你的体验？",
-        decision=ReviewDecision(
-            approved=True,
+        decision=review_decision(
             final_response="你似乎很累。哪一种疲惫最接近你的体验？",
-            issues=[],
-            risk_level="none",
             rationale="The draft is tentative and exploratory.",
         ),
     )
@@ -106,19 +112,22 @@ def test_review_agent_can_approve_draft() -> None:
     result = asyncio.run(build_orchestrator(gateway).respond("我最近很累"))
 
     assert result.response == "你似乎很累。哪一种疲惫最接近你的体验？"
-    assert result.mode == "dual-agent"
+    assert result.mode == "multi-agent"
     assert result.support_mode == "reflection"
-    assert [call[0] for call in gateway.calls] == ["reflection", "review"]
+    assert [call[0] for call in gateway.calls] == [
+        "reflection",
+        "review",
+        "review_verifier",
+    ]
 
 
 def test_reviewed_history_is_passed_to_both_agents_as_bounded_context() -> None:
     gateway = FakeGateway(
         draft="我们可以从这次的新变化开始看。",
-        decision=ReviewDecision(
-            approved=True,
+        decision=review_decision(
+            draft_disposition="rewritten",
+            draft_findings=["pas_principle_violation"],
             final_response="这次似乎和上次有一点不同。你最先注意到的变化是什么？",
-            issues=[],
-            risk_level="none",
             rationale="The response remains tentative and uses the prior turn as context.",
         ),
     )
@@ -139,6 +148,7 @@ def test_reviewed_history_is_passed_to_both_agents_as_bounded_context() -> None:
 
     reflection_payload = json.loads(gateway.calls[0][1]["user_input"])
     review_payload = json.loads(gateway.calls[1][1]["user_input"])
+    verifier_payload = json.loads(gateway.calls[2][1]["user_input"])
     assert reflection_payload["current_user_message"] == "今天情况有一点变化。"
     assert reflection_payload["conversation_history"] == [
         {"role": "user", "content": "上次我说工作让我很累。"},
@@ -151,17 +161,22 @@ def test_reviewed_history_is_passed_to_both_agents_as_bounded_context() -> None:
     assert review_payload["conversation_history"] == reflection_payload[
         "conversation_history"
     ]
+    assert verifier_payload["conversation_history"] == reflection_payload[
+        "conversation_history"
+    ]
+    assert verifier_payload["candidate_response"] == (
+        "这次似乎和上次有一点不同。你最先注意到的变化是什么？"
+    )
     assert result.response == "这次似乎和上次有一点不同。你最先注意到的变化是什么？"
 
 
 def test_review_agent_can_rewrite_unsafe_draft() -> None:
     gateway = FakeGateway(
         draft="你就是回避型人格。",
-        decision=ReviewDecision(
-            approved=False,
+        decision=review_decision(
+            draft_disposition="rewritten",
+            draft_findings=["diagnosis", "labeling", "overcertainty"],
             final_response="在一些情境里，你似乎会选择退开。你觉得这种描述贴近你的体验吗？",
-            issues=["diagnosis", "labeling", "overcertainty"],
-            risk_level="none",
             rationale="The draft fixed a tentative behavior into an identity label.",
         ),
     )
@@ -184,11 +199,10 @@ def test_reflection_and_review_receive_independent_time_budgets() -> None:
     gateway = DelayedGateway(
         reflection_delay=0.06,
         review_delay=0.06,
-        decision=ReviewDecision(
-            approved=True,
+        decision=review_decision(
+            draft_disposition="rewritten",
+            draft_findings=["pas_principle_violation"],
             final_response=final,
-            issues=[],
-            risk_level="none",
             rationale="Safe.",
         ),
     )
@@ -202,18 +216,19 @@ def test_reflection_and_review_receive_independent_time_budgets() -> None:
     )
 
     assert result.response == final
-    assert [call[0] for call in gateway.calls] == ["reflection", "review"]
+    assert [call[0] for call in gateway.calls] == [
+        "reflection",
+        "review",
+        "review_verifier",
+    ]
 
 
 def test_reflection_stage_timeout_is_reported_and_review_is_not_called() -> None:
     gateway = DelayedGateway(
         reflection_delay=0.02,
         review_delay=0,
-        decision=ReviewDecision(
-            approved=True,
+        decision=review_decision(
             final_response="绝不能到达的回复。",
-            issues=[],
-            risk_level="none",
             rationale="Unreachable.",
         ),
     )
@@ -229,6 +244,10 @@ def test_reflection_stage_timeout_is_reported_and_review_is_not_called() -> None
 
     assert caught.value.stage == "reflection"
     assert caught.value.diagnostic.code == "provider_timeout"
+    assert caught.value.diagnostic.timeout_origin == "stage_deadline"
+    assert caught.value.diagnostic.stage_elapsed_ms is not None
+    assert caught.value.diagnostic.stage_elapsed_ms >= 1
+    assert caught.value.diagnostic.stage_timeout_ms == 1
     assert [call[0] for call in gateway.calls] == ["reflection"]
 
 
@@ -236,11 +255,8 @@ def test_review_stage_timeout_fails_closed_without_returning_draft() -> None:
     gateway = DelayedGateway(
         reflection_delay=0,
         review_delay=0.02,
-        decision=ReviewDecision(
-            approved=True,
+        decision=review_decision(
             final_response="绝不能到达的回复。",
-            issues=[],
-            risk_level="none",
             rationale="Unreachable.",
         ),
     )
@@ -256,6 +272,10 @@ def test_review_stage_timeout_fails_closed_without_returning_draft() -> None:
 
     assert caught.value.stage == "review"
     assert caught.value.diagnostic.code == "provider_timeout"
+    assert caught.value.diagnostic.timeout_origin == "stage_deadline"
+    assert caught.value.diagnostic.stage_elapsed_ms is not None
+    assert caught.value.diagnostic.stage_elapsed_ms >= 1
+    assert caught.value.diagnostic.stage_timeout_ms == 1
     assert [call[0] for call in gateway.calls] == ["reflection", "review"]
     assert "draft" not in str(caught.value)
 
@@ -263,11 +283,10 @@ def test_review_stage_timeout_fails_closed_without_returning_draft() -> None:
 def test_chat_endpoint_returns_only_reviewed_response() -> None:
     gateway = FakeGateway(
         draft="未经审核的草稿",
-        decision=ReviewDecision(
-            approved=False,
+        decision=review_decision(
+            draft_disposition="rewritten",
+            draft_findings=["pas_principle_violation"],
             final_response="这是经过审核和改写的探索回应。",
-            issues=["pas_principle_violation"],
-            risk_level="none",
             rationale="The original draft did not follow PAS principles.",
         ),
     )
@@ -281,7 +300,7 @@ def test_chat_endpoint_returns_only_reviewed_response() -> None:
     assert response.status_code == 200
     assert response.json() == {
         "response": "这是经过审核和改写的探索回应。",
-        "mode": "dual-agent",
+        "mode": "multi-agent",
         "support_mode": "reflection",
         "response_source": "review",
         "persistence": {"status": "not_requested"},

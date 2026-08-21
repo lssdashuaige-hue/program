@@ -5,10 +5,16 @@ import {
   type EvalCaseResult,
   type EvalRunResponse,
   isRetryableEvalFailure,
-  normalizeEvalRunResponse,
+  normalizeHistoricalEvalRunResponse,
 } from "@/lib/evals";
 
-const REPORT_SCHEMA_VERSION = 1;
+const REPORT_SCHEMA_VERSION = 2;
+const reportKeys = new Set([
+  "schema_version",
+  "saved_at",
+  "full_attempt",
+  "retry_attempts",
+]);
 export const MAX_EVAL_RETRY_ATTEMPTS = 12;
 
 export type SavedEvalReport = {
@@ -83,17 +89,23 @@ export function createSavedEvalReport(
 export function parseSavedEvalReport(value: unknown): SavedEvalReport {
   if (
     !isRecord(value) ||
+    Object.keys(value).length !== reportKeys.size ||
+    !Object.keys(value).every((key) => reportKeys.has(key)) ||
     value.schema_version !== REPORT_SCHEMA_VERSION ||
     typeof value.saved_at !== "string" ||
     !Number.isFinite(Date.parse(value.saved_at)) ||
     !Array.isArray(value.retry_attempts) ||
     value.retry_attempts.length > MAX_EVAL_RETRY_ATTEMPTS
   ) {
-    throw new EvalClientError("保存的评测报告版本或结构无法识别。");
+    throw new EvalClientError(
+      "保存的评测报告版本或结构无法识别；旧单遍 Review 报告不能作为当前双门验收。",
+    );
   }
 
-  const fullAttempt = normalizeEvalRunResponse(value.full_attempt);
-  const retryAttempts = value.retry_attempts.map(normalizeEvalRunResponse);
+  const fullAttempt = normalizeHistoricalEvalRunResponse(value.full_attempt);
+  const retryAttempts = value.retry_attempts.map(
+    normalizeHistoricalEvalRunResponse,
+  );
   validateReportRelationship(fullAttempt, retryAttempts);
 
   return {

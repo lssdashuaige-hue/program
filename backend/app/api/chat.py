@@ -24,6 +24,8 @@ from app.ai.safety import preflight_safety_result, safe_fallback_result
 from app.auth import optional_authenticated_user
 from app.config import Settings, get_settings
 from app.persistence import (
+    CURRENT_REVIEW_CONTRACT_VERSION,
+    CURRENT_VERIFICATION_CONTRACT_VERSION,
     PersistenceConflict,
     PersistenceNotAllowed,
     PersistenceUnauthorized,
@@ -254,7 +256,7 @@ async def chat(
                 if existing is not None:
                     return ChatResponse(
                         response=existing.response,
-                        mode="dual-agent",
+                        mode="multi-agent",
                         support_mode="reflection",
                         response_source="review",
                         persistence=_saved_persistence(existing),
@@ -357,6 +359,9 @@ async def chat(
             response_source=result.response_source,
             support_mode=result.support_mode,
             risk_level=result.risk_level,
+            review_contract_version=CURRENT_REVIEW_CONTRACT_VERSION,
+            verification_contract_version=CURRENT_VERIFICATION_CONTRACT_VERSION,
+            bounded_response_kind=result.bounded_response_kind,
             conversation_id=request.conversation_id,
             conversation_title=_conversation_title(request.message),
         )

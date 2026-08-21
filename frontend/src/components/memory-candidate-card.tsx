@@ -23,15 +23,13 @@ export function MemoryCandidateCard({
   onDismiss,
   onSaved,
 }: Props) {
-  const [content, setContent] = useState(candidate.content);
   const [status, setStatus] = useState<
     "idle" | "saving" | "signed_out" | "error"
   >("idle");
   const [error, setError] = useState<string | null>(null);
 
   async function handleSave() {
-    const confirmedContent = content.trim();
-    if (!confirmedContent || status === "saving") return;
+    if (!candidate.content.trim() || status === "saving") return;
 
     setStatus("saving");
     setError(null);
@@ -40,7 +38,7 @@ export function MemoryCandidateCard({
     try {
       result = await saveConfirmedMemory({
         ...candidate,
-        content: confirmedContent,
+        content: candidate.content,
       });
     } catch {
       setStatus("error");
@@ -79,19 +77,13 @@ export function MemoryCandidateCard({
         {candidate.confirmation_prompt}
       </p>
       <div className="mt-4">
-        <label className="text-sm font-medium" htmlFor="memory-candidate-content">
-          你希望保存的表述
-        </label>
-        <textarea
-          className="mt-2 min-h-28 w-full resize-y rounded-2xl border border-[#c7d3ca] bg-[var(--surface)] px-4 py-3 leading-7 outline-none focus:border-[#7f9a89]"
-          disabled={status === "saving"}
-          id="memory-candidate-content"
-          maxLength={1000}
-          onChange={(event) => setContent(event.target.value)}
-          value={content}
-        />
+        <h3 className="text-sm font-medium">等待你确认的原话</h3>
+        <blockquote className="mt-2 whitespace-pre-wrap rounded-2xl border border-[#c7d3ca] bg-[var(--surface)] px-4 py-3 leading-7">
+          {candidate.content}
+        </blockquote>
         <p className="mt-2 text-xs leading-5 text-[var(--muted)]">
-          这只是等待你确认的理解，不是对你的定义。你可以先修改，再决定是否保存。
+          为了保留否定、引用和来源语境，当前版本只允许按原话确认。
+          如果这段表述不适合长期保存，请选择暂不保存；带版本记录的编辑功能尚未开放。
         </p>
       </div>
 
@@ -117,7 +109,7 @@ export function MemoryCandidateCard({
       <div className="mt-5 flex flex-wrap gap-3">
         <button
           className="rounded-full bg-[var(--ink)] px-5 py-2.5 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
-          disabled={status === "saving" || !content.trim()}
+          disabled={status === "saving" || !candidate.content.trim()}
           onClick={handleSave}
           type="button"
         >

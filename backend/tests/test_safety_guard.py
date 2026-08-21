@@ -2,13 +2,14 @@ import asyncio
 
 import pytest
 
-from app.ai.models import ReviewDecision, RiskLevel
+from app.ai.models import FinalVerificationDecision, ReviewDecision, RiskLevel
 from app.ai.orchestrator import MultiAgentOrchestrator
 from app.ai.safety import (
     classify_preflight_risk,
     deterministic_safety_response,
     safe_fallback_result,
 )
+from tests.review_fixtures import review_decision, verification_decision
 
 
 CONCERNING_ZH_SNAPSHOT = (
@@ -77,6 +78,21 @@ class StubReviewAgent:
         return self.decision
 
 
+class StubFinalVerifier:
+    def __init__(self, candidate: str) -> None:
+        self.decision = verification_decision(candidate)
+        self.calls = 0
+
+    async def verify(
+        self,
+        _user_message: str,
+        _candidate_response: str,
+        **_kwargs: object,
+    ) -> FinalVerificationDecision:
+        self.calls += 1
+        return self.decision
+
+
 class NeverCalledMemoryAgent:
     def __init__(self) -> None:
         self.calls = 0
@@ -98,10 +114,14 @@ def build_stub_orchestrator(
 ]:
     reflection = StubReflectionAgent()
     review = StubReviewAgent(
-        ReviewDecision(
-            approved=risk_level == "none",
+        review_decision(
+            draft_disposition="rewritten",
+            draft_findings=(
+                ["pas_principle_violation"]
+                if risk_level == "none"
+                else ["crisis_mishandling"]
+            ),
             final_response=reviewed_response,
-            issues=[] if risk_level == "none" else ["crisis_mishandling"],
             risk_level=risk_level,
             rationale="Synthetic Review fixture.",
         )
@@ -110,6 +130,7 @@ def build_stub_orchestrator(
     orchestrator = MultiAgentOrchestrator(
         reflection_agent=reflection,
         review_agent=review,
+        final_verifier_agent=StubFinalVerifier(reviewed_response),
         memory_agent=memory,
     )
     return orchestrator, reflection, review, memory

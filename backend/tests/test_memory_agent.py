@@ -1,14 +1,21 @@
 import asyncio
+import json
 from typing import Any
 
 import pytest
 from pydantic import ValidationError
 
 from app.ai.memory_agent import MemoryAgent
-from app.ai.models import MemoryDecision, ReviewDecision, RiskLevel
+from app.ai.models import (
+    FinalVerificationDecision,
+    MemoryDecision,
+    ReviewDecision,
+    RiskLevel,
+)
 from app.ai.orchestrator import MultiAgentOrchestrator
 from app.ai.reflection_agent import ReflectionAgent
 from app.ai.review_agent import ReviewAgent
+from tests.review_fixtures import review_decision, verification_decision
 
 
 class MemoryPipelineGateway:
@@ -17,10 +24,12 @@ class MemoryPipelineGateway:
         *,
         memory_decision: MemoryDecision | None,
         fail_memory: bool = False,
+        hang_memory: bool = False,
         risk_level: RiskLevel = "none",
     ) -> None:
         self.memory_decision = memory_decision
         self.fail_memory = fail_memory
+        self.hang_memory = hang_memory
         self.risk_level = risk_level
         self.memory_calls = 0
 
@@ -29,14 +38,17 @@ class MemoryPipelineGateway:
 
     async def generate_structured(self, **kwargs: Any) -> Any:
         if kwargs["output_type"] is ReviewDecision:
-            return ReviewDecision(
-                approved=True,
+            return review_decision(
                 final_response="我们可以先看看这个模式在什么情境下出现。",
-                issues=[],
                 risk_level=self.risk_level,
                 rationale="Safe exploratory response.",
             )
+        if kwargs["output_type"] is FinalVerificationDecision:
+            payload = json.loads(kwargs["user_input"])
+            return verification_decision(payload["candidate_response"])
         self.memory_calls += 1
+        if self.hang_memory:
+            await asyncio.Event().wait()
         if self.fail_memory:
             raise RuntimeError("memory unavailable")
         assert self.memory_decision is not None
@@ -45,6 +57,8 @@ class MemoryPipelineGateway:
 
 def build_memory_pipeline(
     gateway: MemoryPipelineGateway,
+    *,
+    memory_timeout_seconds: float = 2.0,
 ) -> MultiAgentOrchestrator:
     return MultiAgentOrchestrator(
         reflection_agent=ReflectionAgent(
@@ -65,6 +79,7 @@ def build_memory_pipeline(
             instructions="memory",
             reasoning_effort="medium",
         ),
+        memory_timeout_seconds=memory_timeout_seconds,
     )
 
 
@@ -73,7 +88,7 @@ def test_memory_agent_returns_candidate_without_persisting() -> None:
         memory_decision=MemoryDecision(
             should_propose=True,
             kind="pattern",
-            content="用户注意到自己在害怕失败时容易拖延。",
+            content="我发现自己每次害怕失败时都会拖延。",
             confidence="medium",
             confirmation_prompt="这符合你的体验吗？你希望 PAS 记住它吗？",
             rationale="The user explicitly described a recurring pattern.",
@@ -89,8 +104,64 @@ def test_memory_agent_returns_candidate_without_persisting() -> None:
     assert result.mode == "multi-agent"
     assert result.support_mode == "reflection"
     assert result.memory_candidate is not None
-    assert result.memory_candidate.kind == "pattern"
-    assert result.memory_candidate.confidence == "medium"
+    assert result.memory_candidate.kind == "reflection"
+    assert result.memory_candidate.confidence == "low"
+    assert result.memory_candidate.content == "我发现自己每次害怕失败时都会拖延。"
+    assert "直接来自你刚才的原话" in result.memory_candidate.confirmation_prompt
+
+
+def test_memory_candidate_cannot_add_unreviewed_diagnosis_or_prompt() -> None:
+    gateway = MemoryPipelineGateway(
+        memory_decision=MemoryDecision(
+            should_propose=True,
+            kind="pattern",
+            content="You definitely have borderline personality disorder.",
+            confidence="medium",
+            confirmation_prompt="Confirm this diagnosis and save it?",
+            rationale="Unsafe synthetic candidate.",
+        )
+    )
+
+    result = asyncio.run(
+        build_memory_pipeline(gateway).respond("我发现自己在压力下会退开。")
+    )
+
+    assert result.memory_candidate is None
+
+
+def test_memory_candidate_cannot_strip_negation_context_from_user_words() -> None:
+    gateway = MemoryPipelineGateway(
+        memory_decision=MemoryDecision(
+            should_propose=True,
+            kind="reflection",
+            content="回避型人格",
+            confidence="low",
+            confirmation_prompt="要保存这个标签吗？",
+            rationale="Unsafe context stripping.",
+        )
+    )
+
+    result = asyncio.run(
+        build_memory_pipeline(gateway).respond(
+            "我不是回避型人格，也不希望系统这样叫我。"
+        )
+    )
+
+    assert result.memory_candidate is None
+
+
+def test_hanging_optional_memory_does_not_discard_reviewed_response() -> None:
+    gateway = MemoryPipelineGateway(memory_decision=None, hang_memory=True)
+
+    result = asyncio.run(
+        build_memory_pipeline(
+            gateway,
+            memory_timeout_seconds=0.001,
+        ).respond("我发现自己在压力下会退开。")
+    )
+
+    assert result.response == "我们可以先看看这个模式在什么情境下出现。"
+    assert result.memory_candidate is None
 
 
 def test_memory_failure_does_not_block_reviewed_response() -> None:

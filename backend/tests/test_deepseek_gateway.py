@@ -7,6 +7,7 @@ import pytest
 import app.ai.gateway as gateway_module
 from app.ai.gateway import DeepSeekChatGateway, ModelOutputError
 from app.ai.models import ReviewDecision
+from tests.review_fixtures import review_decision
 
 
 class FakeCompletions:
@@ -81,11 +82,10 @@ def test_deepseek_client_disables_implicit_sdk_retries(
 
 
 def test_deepseek_structured_review_is_validated() -> None:
-    content = ReviewDecision(
-        approved=False,
+    content = review_decision(
+        draft_disposition="rewritten",
+        draft_findings=["overcertainty"],
         final_response="这是审核后的回复。",
-        issues=["overcertainty"],
-        risk_level="none",
         rationale="The draft was too certain.",
     ).model_dump_json()
     client = FakeDeepSeekClient([content])
@@ -109,12 +109,34 @@ def test_deepseek_structured_review_is_validated() -> None:
     assert call["max_tokens"] == 2400
 
 
+def test_deepseek_structured_review_can_disable_thinking_for_bounded_latency() -> None:
+    content = review_decision(
+        final_response="非思考模式仍必须通过严格结构合同。",
+        rationale="Bounded structured review.",
+    ).model_dump_json()
+    client = FakeDeepSeekClient([content])
+    gateway = DeepSeekChatGateway("test-key", client=client)
+
+    result = asyncio.run(
+        gateway.generate_structured(
+            model="deepseek-v4-pro",
+            instructions="PAS review",
+            user_input="test",
+            reasoning_effort="high",
+            output_type=ReviewDecision,
+            thinking_enabled=False,
+        )
+    )
+
+    assert result.final_response == "非思考模式仍必须通过严格结构合同。"
+    call = client.completions.calls[0]
+    assert call["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert "reasoning_effort" not in call
+
+
 def test_deepseek_review_never_uses_reasoning_content_as_output() -> None:
-    safe_content = ReviewDecision(
-        approved=True,
+    safe_content = review_decision(
         final_response="只采用 content 中经过验证的回复。",
-        issues=[],
-        risk_level="none",
         rationale="The content is safe.",
     ).model_dump_json()
     client = FakeDeepSeekClient(
@@ -141,6 +163,29 @@ def test_deepseek_review_never_uses_reasoning_content_as_output() -> None:
 
 def test_deepseek_invalid_review_fails_closed_after_retry() -> None:
     client = FakeDeepSeekClient(["not json", None])
+    gateway = DeepSeekChatGateway("test-key", client=client)
+
+    with pytest.raises(ModelOutputError):
+        asyncio.run(
+            gateway.generate_structured(
+                model="deepseek-v4-pro",
+                instructions="PAS review",
+                user_input="test",
+                reasoning_effort="high",
+                output_type=ReviewDecision,
+            )
+        )
+
+    assert len(client.completions.calls) == 2
+
+
+def test_deepseek_duplicate_json_keys_fail_closed_instead_of_using_last_value() -> None:
+    valid = review_decision(
+        final_response="绝不能通过重复键覆盖合同。",
+        rationale="Synthetic duplicate-key test.",
+    ).model_dump_json()
+    duplicate = '{"contract_version":"1",' + valid[1:]
+    client = FakeDeepSeekClient([duplicate, duplicate])
     gateway = DeepSeekChatGateway("test-key", client=client)
 
     with pytest.raises(ModelOutputError):

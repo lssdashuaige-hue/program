@@ -125,6 +125,9 @@ def test_list_and_message_history_use_stable_envelopes() -> None:
     assert messages.status_code == 200
     assert messages.json()["conversation_id"] == str(fake.conversation.id)
     assert messages.json()["items"][0]["role"] == "user"
+    assert "review_contract_version" not in messages.json()["items"][0]
+    assert "verification_contract_version" not in messages.json()["items"][0]
+    assert "bounded_response_kind" not in messages.json()["items"][0]
 
 
 def test_create_rename_archive_and_delete_conversation() -> None:

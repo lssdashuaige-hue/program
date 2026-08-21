@@ -9,15 +9,47 @@ from pydantic import SecretStr
 
 from app.auth import AuthenticatedUser
 from app.persistence import (
+    CURRENT_REVIEW_CONTRACT_VERSION,
+    CURRENT_VERIFICATION_CONTRACT_VERSION,
+    OWNED_TURN_LOCATOR_SELECT,
+    PRIVATE_MESSAGE_SELECT,
+    PUBLIC_MESSAGE_SELECT,
+    MessageRecord,
     PersistenceConflict,
     PersistenceNotAllowed,
     PersistenceUnavailable,
+    ResourceNotFound,
     SupabasePersistence,
     should_persist_response,
 )
 
 
 NOW = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc).isoformat()
+
+
+def message_provenance(
+    role: str,
+    *,
+    legacy: bool = False,
+    bounded_response_kind: str | None = None,
+) -> dict[str, str | None]:
+    if role != "assistant":
+        return {
+            "review_contract_version": None,
+            "verification_contract_version": None,
+            "bounded_response_kind": None,
+        }
+    if legacy:
+        return {
+            "review_contract_version": "legacy",
+            "verification_contract_version": "legacy",
+            "bounded_response_kind": None,
+        }
+    return {
+        "review_contract_version": CURRENT_REVIEW_CONTRACT_VERSION,
+        "verification_contract_version": CURRENT_VERIFICATION_CONTRACT_VERSION,
+        "bounded_response_kind": bounded_response_kind,
+    }
 
 
 def conversation_row(conversation_id: UUID) -> dict[str, str | None]:
@@ -28,6 +60,27 @@ def conversation_row(conversation_id: UUID) -> dict[str, str | None]:
         "created_at": NOW,
         "updated_at": NOW,
     }
+
+
+def turn_locator_rows(
+    conversation_id: UUID,
+    turn_id: UUID,
+) -> list[dict[str, str]]:
+    return [
+        {
+            "conversation_id": str(conversation_id),
+            "client_turn_id": str(turn_id),
+            "role": role,
+        }
+        for role in ("user", "assistant")
+    ]
+
+
+def private_rows(
+    user_id: UUID,
+    rows: list[dict[str, str | None]],
+) -> list[dict[str, str | None]]:
+    return [{**row, "user_id": str(user_id)} for row in rows]
 
 
 def test_conversation_reads_are_user_scoped_and_rls_authenticated() -> None:
@@ -53,6 +106,64 @@ def test_conversation_reads_are_user_scoped_and_rls_authenticated() -> None:
     assert [row.id for row in rows] == [conversation_id]
 
 
+def test_current_provenance_is_excluded_from_public_message_serialization() -> None:
+    message = MessageRecord(
+        id=uuid4(),
+        conversation_id=uuid4(),
+        client_turn_id=uuid4(),
+        role="assistant",
+        content="公开回应",
+        response_source="review",
+        support_mode="reflection",
+        risk_level="none",
+        review_contract_version="2",
+        verification_contract_version="2",
+        bounded_response_kind="unavailable_cross_chat_context",
+        created_at=NOW,
+    )
+
+    payload = message.model_dump(mode="json")
+
+    assert payload["content"] == "公开回应"
+    assert "review_contract_version" not in payload
+    assert "verification_contract_version" not in payload
+    assert "bounded_response_kind" not in payload
+
+
+def test_verifier_v1_turn_is_history_only_and_cannot_enter_current_context() -> None:
+    conversation_id = uuid4()
+    turn_id = uuid4()
+    rows = [
+        MessageRecord(
+            id=uuid4(),
+            conversation_id=conversation_id,
+            client_turn_id=turn_id,
+            role="user",
+            content="旧版用户表达",
+            created_at=NOW,
+        ),
+        MessageRecord(
+            id=uuid4(),
+            conversation_id=conversation_id,
+            client_turn_id=turn_id,
+            role="assistant",
+            content="旧版 v1 回应",
+            response_source="review",
+            support_mode="reflection",
+            risk_level="none",
+            review_contract_version="2",
+            verification_contract_version="1",
+            created_at=NOW,
+        ),
+    ]
+
+    assert SupabasePersistence._complete_reviewed_turn_messages(
+        rows,
+        current_contracts_only=True,
+    ) == []
+    assert SupabasePersistence._complete_reviewed_turn_messages(rows) == rows
+
+
 def test_existing_reviewed_turn_is_returned_without_any_write() -> None:
     user_id = uuid4()
     conversation_id = uuid4()
@@ -64,40 +175,60 @@ def test_existing_reviewed_turn_is_returned_without_any_write() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(request.method)
         assert request.method == "GET"
-        assert request.headers["authorization"] == "Bearer user-token"
         if request.url.path.endswith("/conversations"):
+            assert request.headers["authorization"] == "Bearer user-token"
             return httpx.Response(200, json=[conversation_row(conversation_id)])
+        if request.url.params["select"] == OWNED_TURN_LOCATOR_SELECT:
+            assert request.headers["authorization"] == "Bearer user-token"
+            assert "user_id" not in request.url.params
+            return httpx.Response(
+                200,
+                json=turn_locator_rows(conversation_id, turn_id),
+            )
+        assert request.url.params["select"] == PRIVATE_MESSAGE_SELECT
+        assert request.headers["apikey"] == "sb_secret_test"
+        assert "authorization" not in request.headers
+        assert request.url.params["user_id"] == f"eq.{user_id}"
+        assert request.url.params["conversation_id"] == f"eq.{conversation_id}"
+        assert request.url.params["client_turn_id"] == f"eq.{turn_id}"
+        assert request.url.params["limit"] == "3"
         return httpx.Response(
             200,
-            json=[
-                {
-                    "id": str(user_message_id),
-                    "conversation_id": str(conversation_id),
-                    "client_turn_id": str(turn_id),
-                    "role": "user",
-                    "content": "我想整理今天。",
-                    "response_source": None,
-                    "support_mode": None,
-                    "risk_level": None,
-                    "created_at": NOW,
-                },
-                {
-                    "id": str(assistant_message_id),
-                    "conversation_id": str(conversation_id),
-                    "client_turn_id": str(turn_id),
-                    "role": "assistant",
-                    "content": "你想先从哪一部分开始？",
-                    "response_source": "review",
-                    "support_mode": "reflection",
-                    "risk_level": "none",
-                    "created_at": NOW,
-                },
-            ],
+            json=private_rows(
+                user_id,
+                [
+                    {
+                        "id": str(user_message_id),
+                        "conversation_id": str(conversation_id),
+                        "client_turn_id": str(turn_id),
+                        "role": "user",
+                        "content": "我想整理今天。",
+                        "response_source": None,
+                        "support_mode": None,
+                        "risk_level": None,
+                        **message_provenance("user"),
+                        "created_at": NOW,
+                    },
+                    {
+                        "id": str(assistant_message_id),
+                        "conversation_id": str(conversation_id),
+                        "client_turn_id": str(turn_id),
+                        "role": "assistant",
+                        "content": "你想先从哪一部分开始？",
+                        "response_source": "review",
+                        "support_mode": "reflection",
+                        "risk_level": "none",
+                        **message_provenance("assistant"),
+                        "created_at": NOW,
+                    },
+                ],
+            ),
         )
 
     persistence = SupabasePersistence(
         supabase_url="https://project.supabase.co",
         publishable_key="publishable-key",
+        secret_key=SecretStr("sb_secret_test"),
         transport=httpx.MockTransport(handler),
     )
     user = AuthenticatedUser(id=user_id, access_token="user-token")
@@ -115,7 +246,124 @@ def test_existing_reviewed_turn_is_returned_without_any_write() -> None:
     assert saved.user_message_id == user_message_id
     assert saved.assistant_message_id == assistant_message_id
     assert saved.already_saved is True
+    assert calls == ["GET", "GET", "GET"]
+
+
+def test_legacy_single_review_turn_cannot_replay_as_current_success() -> None:
+    user_id = uuid4()
+    conversation_id = uuid4()
+    turn_id = uuid4()
+    calls: list[str] = []
+
+    message_reads = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal message_reads
+        calls.append(request.method)
+        assert request.method == "GET"
+        message_reads += 1
+        if request.url.params["select"] == OWNED_TURN_LOCATOR_SELECT:
+            assert request.headers["authorization"] == "Bearer user-token"
+            return httpx.Response(
+                200,
+                json=turn_locator_rows(conversation_id, turn_id),
+            )
+        assert request.url.params["select"] == PRIVATE_MESSAGE_SELECT
+        assert request.headers["apikey"] == "sb_secret_test"
+        return httpx.Response(
+            200,
+            json=private_rows(user_id, [
+                {
+                    "id": str(uuid4()),
+                    "conversation_id": str(conversation_id),
+                    "client_turn_id": str(turn_id),
+                    "role": "user",
+                    "content": "旧版原文",
+                    "response_source": None,
+                    "support_mode": None,
+                    "risk_level": None,
+                    **message_provenance("user"),
+                    "created_at": NOW,
+                },
+                {
+                    "id": str(uuid4()),
+                    "conversation_id": str(conversation_id),
+                    "client_turn_id": str(turn_id),
+                    "role": "assistant",
+                    "content": "只经过旧版单门 Review 的回应",
+                    "response_source": "review",
+                    "support_mode": "reflection",
+                    "risk_level": "none",
+                    **message_provenance("assistant", legacy=True),
+                    "created_at": NOW,
+                },
+            ]),
+        )
+
+    persistence = SupabasePersistence(
+        supabase_url="https://project.supabase.co",
+        publishable_key="publishable-key",
+        secret_key=SecretStr("sb_secret_test"),
+        transport=httpx.MockTransport(handler),
+    )
+    user = AuthenticatedUser(id=user_id, access_token="user-token")
+
+    with pytest.raises(PersistenceConflict, match="current release contracts"):
+        asyncio.run(
+            persistence.get_saved_turn(
+                user,
+                client_turn_id=turn_id,
+                user_content="旧版原文",
+            )
+        )
+
+    assert message_reads == 2
     assert calls == ["GET", "GET"]
+
+
+def test_turn_lookup_is_global_before_rejecting_a_different_conversation() -> None:
+    user_id = uuid4()
+    requested_conversation_id = uuid4()
+    existing_conversation_id = uuid4()
+    turn_id = uuid4()
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path.endswith("/conversations"):
+            assert request.url.params["id"] == f"eq.{requested_conversation_id}"
+            return httpx.Response(
+                200,
+                json=[conversation_row(requested_conversation_id)],
+            )
+
+        assert request.url.path.endswith("/messages")
+        assert request.url.params["client_turn_id"] == f"eq.{turn_id}"
+        assert "conversation_id" not in request.url.params
+        return httpx.Response(
+            200,
+            json=turn_locator_rows(existing_conversation_id, turn_id),
+        )
+
+    persistence = SupabasePersistence(
+        supabase_url="https://project.supabase.co",
+        publishable_key="publishable-key",
+        secret_key=SecretStr("sb_secret_test"),
+        transport=httpx.MockTransport(handler),
+    )
+    user = AuthenticatedUser(id=user_id, access_token="user-token")
+
+    with pytest.raises(PersistenceConflict, match="expected conversation"):
+        asyncio.run(
+            persistence.get_saved_turn(
+                user,
+                conversation_id=requested_conversation_id,
+                client_turn_id=turn_id,
+                user_content="旧版原文",
+            )
+        )
+
+    assert len(calls) == 2
 
 
 def test_turn_id_reuse_with_different_content_is_rejected() -> None:
@@ -126,9 +374,14 @@ def test_turn_id_reuse_with_different_content_is_rejected() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/conversations"):
             return httpx.Response(200, json=[conversation_row(conversation_id)])
+        if request.url.params["select"] == OWNED_TURN_LOCATOR_SELECT:
+            return httpx.Response(
+                200,
+                json=turn_locator_rows(conversation_id, turn_id),
+            )
         return httpx.Response(
             200,
-            json=[
+            json=private_rows(user_id, [
                 {
                     "id": str(uuid4()),
                     "conversation_id": str(conversation_id),
@@ -138,6 +391,7 @@ def test_turn_id_reuse_with_different_content_is_rejected() -> None:
                     "response_source": None,
                     "support_mode": None,
                     "risk_level": None,
+                    **message_provenance("user"),
                     "created_at": NOW,
                 },
                 {
@@ -149,14 +403,16 @@ def test_turn_id_reuse_with_different_content_is_rejected() -> None:
                     "response_source": "review",
                     "support_mode": "reflection",
                     "risk_level": "none",
+                    **message_provenance("assistant"),
                     "created_at": NOW,
                 },
-            ],
+            ]),
         )
 
     persistence = SupabasePersistence(
         supabase_url="https://project.supabase.co",
         publishable_key="publishable-key",
+        secret_key=SecretStr("sb_secret_test"),
         transport=httpx.MockTransport(handler),
     )
     user = AuthenticatedUser(id=user_id, access_token="user-token")
@@ -172,41 +428,222 @@ def test_turn_id_reuse_with_different_content_is_rejected() -> None:
         )
 
 
+def test_rls_hidden_turn_never_reaches_the_private_read_channel() -> None:
+    user_id = uuid4()
+    turn_id = uuid4()
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.url.path.endswith("/messages")
+        assert request.url.params["select"] == OWNED_TURN_LOCATOR_SELECT
+        assert request.headers["authorization"] == "Bearer user-token"
+        assert request.headers["apikey"] == "publishable-key"
+        assert "user_id" not in request.url.params
+        return httpx.Response(200, json=[])
+
+    persistence = SupabasePersistence(
+        supabase_url="https://project.supabase.co",
+        publishable_key="publishable-key",
+        secret_key=SecretStr("sb_secret_test"),
+        transport=httpx.MockTransport(handler),
+    )
+    user = AuthenticatedUser(id=user_id, access_token="user-token")
+
+    saved = asyncio.run(
+        persistence.get_saved_turn(
+            user,
+            client_turn_id=turn_id,
+            user_content="另一个用户的原文",
+        )
+    )
+
+    assert saved is None
+    assert len(requests) == 1
+
+
+def test_private_turn_read_rejects_rows_outside_verified_user_scope() -> None:
+    user_id = uuid4()
+    other_user_id = uuid4()
+    conversation_id = uuid4()
+    turn_id = uuid4()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params["select"] == OWNED_TURN_LOCATOR_SELECT:
+            return httpx.Response(
+                200,
+                json=turn_locator_rows(conversation_id, turn_id),
+            )
+        assert request.url.params["select"] == PRIVATE_MESSAGE_SELECT
+        assert request.url.params["user_id"] == f"eq.{user_id}"
+        return httpx.Response(
+            200,
+            json=private_rows(
+                other_user_id,
+                [
+                    {
+                        "id": str(uuid4()),
+                        "conversation_id": str(conversation_id),
+                        "client_turn_id": str(turn_id),
+                        "role": "user",
+                        "content": "原文",
+                        "response_source": None,
+                        "support_mode": None,
+                        "risk_level": None,
+                        **message_provenance("user"),
+                        "created_at": NOW,
+                    },
+                    {
+                        "id": str(uuid4()),
+                        "conversation_id": str(conversation_id),
+                        "client_turn_id": str(turn_id),
+                        "role": "assistant",
+                        "content": "回应",
+                        "response_source": "review",
+                        "support_mode": "reflection",
+                        "risk_level": "none",
+                        **message_provenance("assistant"),
+                        "created_at": NOW,
+                    },
+                ],
+            ),
+        )
+
+    persistence = SupabasePersistence(
+        supabase_url="https://project.supabase.co",
+        publishable_key="publishable-key",
+        secret_key=SecretStr("sb_secret_test"),
+        transport=httpx.MockTransport(handler),
+    )
+    user = AuthenticatedUser(id=user_id, access_token="user-token")
+
+    with pytest.raises(PersistenceConflict, match="ownership scope"):
+        asyncio.run(
+            persistence.get_saved_turn(
+                user,
+                client_turn_id=turn_id,
+                user_content="原文",
+            )
+        )
+
+
+def test_context_for_non_owner_fails_before_private_read() -> None:
+    user_id = uuid4()
+    conversation_id = uuid4()
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.url.path.endswith("/conversations")
+        assert request.headers["authorization"] == "Bearer user-token"
+        return httpx.Response(200, json=[])
+
+    persistence = SupabasePersistence(
+        supabase_url="https://project.supabase.co",
+        publishable_key="publishable-key",
+        secret_key=SecretStr("sb_secret_test"),
+        transport=httpx.MockTransport(handler),
+    )
+    user = AuthenticatedUser(id=user_id, access_token="user-token")
+
+    with pytest.raises(ResourceNotFound, match="Conversation not found"):
+        asyncio.run(persistence.list_context_messages(user, conversation_id))
+
+    assert len(requests) == 1
+
+
+def test_private_context_without_server_secret_fails_without_network() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("A private read without a secret must fail closed.")
+
+    persistence = SupabasePersistence(
+        supabase_url="https://project.supabase.co",
+        publishable_key="publishable-key",
+        transport=httpx.MockTransport(handler),
+    )
+    user = AuthenticatedUser(id=uuid4(), access_token="user-token")
+
+    with pytest.raises(PersistenceUnavailable):
+        asyncio.run(persistence.list_context_messages(user, uuid4()))
+
+
 def test_model_context_is_newest_first_at_storage_but_returned_as_complete_turns() -> None:
     user_id = uuid4()
     conversation_id = uuid4()
     newest_turn_id = uuid4()
     older_turn_id = uuid4()
+    legacy_turn_id = uuid4()
 
-    def row(*, role: str, content: str, turn_id: UUID) -> dict[str, str | None]:
+    def row(
+        *,
+        role: str,
+        content: str,
+        turn_id: UUID,
+        legacy: bool = False,
+        bounded_response_kind: str | None = None,
+    ) -> dict[str, str | None]:
         return {
             "id": str(uuid4()),
             "conversation_id": str(conversation_id),
+            "user_id": str(user_id),
             "client_turn_id": str(turn_id),
             "role": role,
             "content": content,
             "response_source": "review" if role == "assistant" else None,
             "support_mode": "reflection" if role == "assistant" else None,
             "risk_level": "none" if role == "assistant" else None,
+            **message_provenance(
+                role,
+                legacy=legacy and role == "assistant",
+                bounded_response_kind=bounded_response_kind,
+            ),
             "created_at": NOW,
         }
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/conversations"):
+            assert request.headers["authorization"] == "Bearer user-token"
+            return httpx.Response(200, json=[conversation_row(conversation_id)])
+        assert request.headers["apikey"] == "sb_secret_test"
+        assert "authorization" not in request.headers
+        assert request.url.params["select"] == PRIVATE_MESSAGE_SELECT
+        assert request.url.params["user_id"] == f"eq.{user_id}"
+        assert request.url.params["conversation_id"] == f"eq.{conversation_id}"
+        assert request.url.params["client_turn_id"] == "not.is.null"
+        assert request.url.params["role"] == "in.(user,assistant)"
         assert request.url.params["order"] == "created_at.desc,role.asc,id.desc"
         assert request.url.params["limit"] == "12"
         return httpx.Response(
             200,
             json=[
-                row(role="assistant", content="新回应", turn_id=newest_turn_id),
+                row(
+                    role="assistant",
+                    content="新回应",
+                    turn_id=newest_turn_id,
+                    bounded_response_kind="unavailable_cross_chat_context",
+                ),
                 row(role="user", content="新表达", turn_id=newest_turn_id),
                 row(role="assistant", content="旧回应", turn_id=older_turn_id),
                 row(role="user", content="旧表达", turn_id=older_turn_id),
+                row(
+                    role="assistant",
+                    content="旧版单门回应",
+                    turn_id=legacy_turn_id,
+                    legacy=True,
+                ),
+                row(
+                    role="user",
+                    content="旧版单门表达",
+                    turn_id=legacy_turn_id,
+                    legacy=True,
+                ),
             ],
         )
 
     persistence = SupabasePersistence(
         supabase_url="https://project.supabase.co",
         publishable_key="publishable-key",
+        secret_key=SecretStr("sb_secret_test"),
         transport=httpx.MockTransport(handler),
     )
     user = AuthenticatedUser(id=user_id, access_token="user-token")
@@ -223,13 +660,19 @@ def test_model_context_is_newest_first_at_storage_but_returned_as_complete_turns
     ]
 
 
-def test_history_excludes_orphan_and_legacy_unreviewed_rows() -> None:
+def test_history_preserves_legacy_reviewed_turns_and_excludes_orphans() -> None:
     user_id = uuid4()
     conversation_id = uuid4()
     reviewed_turn_id = uuid4()
     orphan_turn_id = uuid4()
 
     def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["authorization"] == "Bearer user-token"
+        assert request.url.params["select"] == PUBLIC_MESSAGE_SELECT
+        assert "user_id" not in request.url.params
+        assert "review_contract_version" not in request.url.params["select"]
+        assert "verification_contract_version" not in request.url.params["select"]
+        assert "bounded_response_kind" not in request.url.params["select"]
         assert request.url.params["order"] == "created_at.desc,role.asc,id.desc"
         assert request.url.params["limit"] == "400"
         return httpx.Response(
@@ -330,18 +773,59 @@ def test_history_keeps_each_turn_adjacent_when_timestamps_collide() -> None:
 
 
 @pytest.mark.parametrize(
-    ("response_source", "support_mode", "risk_level", "expected"),
+    (
+        "response_source",
+        "support_mode",
+        "risk_level",
+        "review_contract_version",
+        "verification_contract_version",
+        "bounded_response_kind",
+        "expected",
+    ),
     [
-        ("review", "reflection", "none", True),
-        ("safety_guard", "support", "urgent", False),
-        ("review_safety_envelope", "support", "concerning", False),
-        ("safe_fallback", "support", None, False),
+        ("review", "reflection", "none", "2", "2", None, True),
+        (
+            "review",
+            "reflection",
+            "none",
+            "2",
+            "2",
+            "single_chat_diagnostic_request",
+            True,
+        ),
+        (
+            "review",
+            "reflection",
+            "none",
+            "2",
+            "2",
+            "unavailable_cross_chat_context",
+            True,
+        ),
+        ("review", "reflection", "none", "2", "1", None, False),
+        ("review", "reflection", "none", "legacy", "legacy", None, False),
+        ("review", "reflection", "none", "2", "legacy", None, False),
+        ("review", "reflection", "none", "2", "2", "unknown_kind", False),
+        ("safety_guard", "support", "urgent", "2", "2", None, False),
+        (
+            "review_safety_envelope",
+            "support",
+            "concerning",
+            "2",
+            "2",
+            None,
+            False,
+        ),
+        ("safe_fallback", "support", None, "2", "2", None, False),
     ],
 )
 def test_only_normal_reviewed_response_is_persistable(
     response_source: str,
     support_mode: str,
     risk_level: str | None,
+    review_contract_version: str,
+    verification_contract_version: str,
+    bounded_response_kind: str | None,
     expected: bool,
 ) -> None:
     assert (
@@ -349,12 +833,21 @@ def test_only_normal_reviewed_response_is_persistable(
             response_source=response_source,
             support_mode=support_mode,
             risk_level=risk_level,
+            review_contract_version=review_contract_version,
+            verification_contract_version=verification_contract_version,
+            bounded_response_kind=bounded_response_kind,
         )
         is expected
     )
 
 
-def test_save_reviewed_turn_bulk_inserts_only_public_pair() -> None:
+@pytest.mark.parametrize(
+    "bounded_kind",
+    ["third_party_private_state", "unavailable_cross_chat_context"],
+)
+def test_save_reviewed_turn_bulk_inserts_only_public_pair(
+    bounded_kind: str,
+) -> None:
     user_id = uuid4()
     conversation_id = uuid4()
     turn_id = uuid4()
@@ -380,9 +873,16 @@ def test_save_reviewed_turn_bulk_inserts_only_public_pair() -> None:
         assert all(row["client_turn_id"] == str(turn_id) for row in payload)
         assert set(payload[0]) == set(payload[1])
         user_row = next(row for row in payload if row["role"] == "user")
+        assistant_row = next(row for row in payload if row["role"] == "assistant")
         assert user_row["response_source"] is None
         assert user_row["support_mode"] is None
         assert user_row["risk_level"] is None
+        assert user_row["review_contract_version"] is None
+        assert user_row["verification_contract_version"] is None
+        assert user_row["bounded_response_kind"] is None
+        assert assistant_row["review_contract_version"] == "2"
+        assert assistant_row["verification_contract_version"] == "2"
+        assert assistant_row["bounded_response_kind"] == bounded_kind
         assert "SENTINEL_DRAFT" not in request.content.decode()
         assert "SENTINEL_RATIONALE" not in request.content.decode()
 
@@ -418,6 +918,9 @@ def test_save_reviewed_turn_bulk_inserts_only_public_pair() -> None:
             response_source="review",
             support_mode="reflection",
             risk_level="none",
+            review_contract_version=CURRENT_REVIEW_CONTRACT_VERSION,
+            verification_contract_version=CURRENT_VERIFICATION_CONTRACT_VERSION,
+            bounded_response_kind=bounded_kind,
         )
     )
 
@@ -449,6 +952,9 @@ def test_save_reviewed_turn_rejects_support_before_any_network_call() -> None:
                 response_source="safety_guard",
                 support_mode="support",
                 risk_level="urgent",
+                review_contract_version=CURRENT_REVIEW_CONTRACT_VERSION,
+                verification_contract_version=CURRENT_VERIFICATION_CONTRACT_VERSION,
+                bounded_response_kind=None,
             )
         )
 
@@ -478,11 +984,14 @@ def test_missing_server_secret_fails_before_creating_conversation() -> None:
                 response_source="review",
                 support_mode="reflection",
                 risk_level="none",
+                review_contract_version=CURRENT_REVIEW_CONTRACT_VERSION,
+                verification_contract_version=CURRENT_VERIFICATION_CONTRACT_VERSION,
+                bounded_response_kind=None,
                 conversation_title="普通表达",
             )
         )
 
-    assert methods == ["GET"]
+    assert methods == []
 
 
 def test_failed_first_turn_write_removes_the_empty_conversation() -> None:
@@ -523,6 +1032,9 @@ def test_failed_first_turn_write_removes_the_empty_conversation() -> None:
                 response_source="review",
                 support_mode="reflection",
                 risk_level="none",
+                review_contract_version=CURRENT_REVIEW_CONTRACT_VERSION,
+                verification_contract_version=CURRENT_VERIFICATION_CONTRACT_VERSION,
+                bounded_response_kind=None,
                 conversation_title="普通表达",
             )
         )
@@ -551,6 +1063,7 @@ def test_concurrent_first_turn_returns_winner_and_cleans_temporary_conversation(
                 "response_source": None,
                 "support_mode": None,
                 "risk_level": None,
+                **message_provenance("user"),
                 "created_at": NOW,
             },
             {
@@ -562,6 +1075,7 @@ def test_concurrent_first_turn_returns_winner_and_cleans_temporary_conversation(
                 "response_source": "review",
                 "support_mode": "reflection",
                 "risk_level": "none",
+                **message_provenance("assistant"),
                 "created_at": NOW,
             },
         ]
@@ -570,8 +1084,27 @@ def test_concurrent_first_turn_returns_winner_and_cleans_temporary_conversation(
         nonlocal message_reads, temporary_conversation_id
         methods.append(request.method)
         if request.method == "GET" and request.url.path.endswith("/messages"):
-            message_reads += 1
-            return httpx.Response(200, json=[] if message_reads == 1 else winner_rows())
+            if request.url.params["select"] == OWNED_TURN_LOCATOR_SELECT:
+                message_reads += 1
+                return httpx.Response(
+                    200,
+                    json=(
+                        []
+                        if message_reads == 1
+                        else turn_locator_rows(winner_conversation_id, turn_id)
+                    ),
+                )
+            assert request.url.params["select"] == PRIVATE_MESSAGE_SELECT
+            assert request.headers["apikey"] == "sb_secret_test"
+            assert request.url.params["user_id"] == f"eq.{user_id}"
+            assert (
+                request.url.params["conversation_id"]
+                == f"eq.{winner_conversation_id}"
+            )
+            return httpx.Response(
+                200,
+                json=private_rows(user_id, winner_rows()),
+            )
         if request.method == "POST" and request.url.path.endswith("/conversations"):
             temporary_conversation_id = UUID(json.loads(request.content)["id"])
             return httpx.Response(
@@ -605,6 +1138,9 @@ def test_concurrent_first_turn_returns_winner_and_cleans_temporary_conversation(
             response_source="review",
             support_mode="reflection",
             risk_level="none",
+            review_contract_version=CURRENT_REVIEW_CONTRACT_VERSION,
+            verification_contract_version=CURRENT_VERIFICATION_CONTRACT_VERSION,
+            bounded_response_kind=None,
             conversation_title="同一条普通表达",
         )
     )
@@ -612,7 +1148,7 @@ def test_concurrent_first_turn_returns_winner_and_cleans_temporary_conversation(
     assert saved.already_saved is True
     assert saved.conversation_id == winner_conversation_id
     assert saved.response == "赢家的审核后回应"
-    assert methods == ["GET", "POST", "POST", "GET", "DELETE"]
+    assert methods == ["GET", "POST", "POST", "GET", "GET", "DELETE"]
 
 
 def test_ambiguous_write_recovers_committed_turn_without_deleting_it() -> None:
@@ -627,10 +1163,21 @@ def test_ambiguous_write_recovers_committed_turn_without_deleting_it() -> None:
         nonlocal conversation_id, committed_rows, message_reads
         methods.append(request.method)
         if request.method == "GET" and request.url.path.endswith("/messages"):
-            message_reads += 1
+            if request.url.params["select"] == OWNED_TURN_LOCATOR_SELECT:
+                message_reads += 1
+                return httpx.Response(
+                    200,
+                    json=(
+                        []
+                        if message_reads == 1
+                        else turn_locator_rows(conversation_id, turn_id)
+                    ),
+                )
+            assert request.url.params["select"] == PRIVATE_MESSAGE_SELECT
+            assert conversation_id is not None
             return httpx.Response(
                 200,
-                json=[] if message_reads == 1 else committed_rows,
+                json=private_rows(user_id, committed_rows),
             )
         if request.method == "POST" and request.url.path.endswith("/conversations"):
             conversation_id = UUID(json.loads(request.content)["id"])
@@ -664,13 +1211,16 @@ def test_ambiguous_write_recovers_committed_turn_without_deleting_it() -> None:
             response_source="review",
             support_mode="reflection",
             risk_level="none",
+            review_contract_version=CURRENT_REVIEW_CONTRACT_VERSION,
+            verification_contract_version=CURRENT_VERIFICATION_CONTRACT_VERSION,
+            bounded_response_kind=None,
             conversation_title="普通表达",
         )
     )
 
     assert saved.already_saved is True
     assert saved.conversation_id == conversation_id
-    assert methods == ["GET", "POST", "POST", "GET"]
+    assert methods == ["GET", "POST", "POST", "GET", "GET"]
 
 
 def test_success_response_cannot_replace_the_review_final() -> None:
@@ -713,6 +1263,9 @@ def test_success_response_cannot_replace_the_review_final() -> None:
                 response_source="review",
                 support_mode="reflection",
                 risk_level="none",
+                review_contract_version=CURRENT_REVIEW_CONTRACT_VERSION,
+                verification_contract_version=CURRENT_VERIFICATION_CONTRACT_VERSION,
+                bounded_response_kind=None,
             )
         )
 

@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test:eval-origin-contract": "node --no-warnings --experimental-strip-types tests/evals-origin-contract.mjs"
   },
   "dependencies": {
     "@supabase/ssr": "0.12.3",

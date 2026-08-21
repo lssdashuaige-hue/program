@@ -5,7 +5,14 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from app.ai.models import AgentResult, ReviewDecision
+from app.ai.bounded_responses import bounded_response_candidate
+from app.ai.gateway import GatewayDiagnostic
+from app.ai.models import (
+    AgentResult,
+    FinalVerificationDecision,
+    final_response_digest,
+)
+from app.ai.orchestrator import AgentPipelineError
 from app.api.chat import get_orchestrator
 from app.api.evals import run_evals
 from app.config import Settings, get_settings
@@ -17,12 +24,14 @@ from app.evals.models import (
     MAX_EVAL_CONCURRENCY,
     MAX_EVAL_HISTORY_MESSAGES,
     MAX_EVAL_INPUT_LENGTH,
+    EvalCaseSpec,
     EvalRunRequest,
     SuiteName,
 )
 from app.evals.runner import EvalRunner
 from app.evals.suites import get_suite
 from app.main import app
+from tests.review_fixtures import review_decision, safe_final_checks
 
 
 ADMIN_TOKEN = "pas-evals-admin-token-32-characters"
@@ -32,12 +41,23 @@ DEEPSEEK_SECRET = "provider-deepseek-secret-value"
 
 class StaticOrchestrator:
     async def respond(self, user_message: str, **kwargs: Any) -> AgentResult:
-        final = "我听见你正在整理这段体验。哪部分最需要先看清？"
-        review = ReviewDecision(
-            approved=True,
+        bounded_candidate = bounded_response_candidate(user_message)
+        final = (
+            bounded_candidate.response
+            if bounded_candidate is not None
+            else "我听见你正在整理这段体验。哪部分最需要先看清？"
+        )
+        review = review_decision(
             final_response=final,
-            issues=[],
-            risk_level="none",
+            final_checks=(
+                safe_final_checks(
+                    source_bases=("current_user_message", "general_knowledge"),
+                    cross_chat_boundary="satisfied",
+                )
+                if bounded_candidate is not None
+                and bounded_candidate.kind == "unavailable_cross_chat_context"
+                else None
+            ),
             rationale="Safe synthetic fixture.",
         )
         return AgentResult(
@@ -46,6 +66,17 @@ class StaticOrchestrator:
             support_mode="reflection",
             reflection_draft=final,
             review=review,
+            verification=FinalVerificationDecision(
+                contract_version="2",
+                target_digest=final_response_digest(final),
+                gate_action="release_candidate",
+                primary_finding="none",
+                named_guess_count=0,
+                rationale="Internal verifier fixture must not enter the report.",
+            ),
+            bounded_response_kind=(
+                bounded_candidate.kind if bounded_candidate is not None else None
+            ),
         )
 
 
@@ -67,6 +98,34 @@ class BlockingOrchestrator(StaticOrchestrator):
         self.started.set()
         await self.release.wait()
         return await super().respond(user_message, **kwargs)
+
+
+class ContractFailureOrchestrator:
+    async def respond(self, user_message: str, **kwargs: Any) -> AgentResult:
+        raise AgentPipelineError(
+            stage="review_verifier",
+            diagnostic=GatewayDiagnostic(
+                code="invalid_schema",
+                content_present=True,
+            ),
+            reason="review_contract_violation",
+            contract_failure_code="verifier_rejected",
+            verifier_finding="health_boundary",
+        )
+
+
+class ReviewContractFailureOrchestrator:
+    async def respond(self, user_message: str, **kwargs: Any) -> AgentResult:
+        raise AgentPipelineError(
+            stage="review",
+            diagnostic=GatewayDiagnostic(
+                code="invalid_schema",
+                content_present=True,
+            ),
+            reason="review_contract_violation",
+            contract_failure_code="final_checks_not_release_ready",
+            review_final_finding="diagnostic_self_screening",
+        )
 
 
 def eval_settings(*, enabled: bool = True) -> Settings:
@@ -133,6 +192,7 @@ def test_health_and_suite_metadata_are_protected_and_read_only() -> None:
     assert health.status_code == 200
     assert health.json()["provider_ready"] is True
     assert health.json()["limits"]["max_cases"] == MAX_EVAL_CASES
+    assert health.json()["limits"]["max_concurrency"] == 2
     assert (
         health.json()["limits"]["max_history_messages"]
         == MAX_EVAL_HISTORY_MESSAGES
@@ -500,9 +560,241 @@ def test_run_report_contains_auditable_fields_but_no_secrets() -> None:
     assert case["safety_guard_applied"] is False
     assert case["memory_candidate_present"] is False
     assert case["review_completed"] is True
+    assert set(case["review"]) == {
+        "contract_version",
+        "draft_disposition",
+        "draft_findings",
+        "final_checks",
+        "risk_level",
+        "rationale",
+    }
+    assert case["review"]["contract_version"] == "2"
+    assert case["review"]["draft_disposition"] == "accepted"
+    assert case["review"]["draft_findings"] == []
+    assert case["review"]["final_checks"]["release_ready"] is True
+    assert "approved" not in case["review"]
+    assert "issues" not in case["review"]
     assert case["review"]["rationale"] == "Safe synthetic fixture."
+    assert case["review_verification"] == {
+        "contract_version": "2",
+        "target_digest": final_response_digest(case["final_response"]),
+        "gate_action": "release_candidate",
+        "primary_finding": "none",
+        "named_guess_count": 0,
+    }
+    assert "rationale" not in case["review_verification"]
+    two_pass = next(
+        assertion
+        for assertion in case["hard_assertions"]
+        if assertion["rule"] == "two_pass_review_chain_enforced"
+    )
+    assert two_pass["applicable"] is True
+    assert two_pass["passed"] is True
     assert case["hard_assertions"]
     assert ADMIN_TOKEN not in response.text
+    assert OPENAI_SECRET not in response.text
+    assert DEEPSEEK_SECRET not in response.text
+
+
+def test_live_eval_api_rejects_a_forged_legacy_verifier_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = EvalCaseSpec(case_id="forged_v1", category="pipeline", input="合成测试")
+    valid = asyncio.run(
+        EvalRunner(StaticOrchestrator()).run([case], suite=None)
+    ).model_dump()
+    valid_case = valid["cases"][0]
+    assert isinstance(valid_case, dict)
+    verification = valid_case["review_verification"]
+    assert isinstance(verification, dict)
+    verification["contract_version"] = "1"
+    verification.pop("named_guess_count")
+
+    async def forged_run(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return valid
+
+    monkeypatch.setattr(EvalRunner, "run", forged_run)
+    authorize(eval_settings(), StaticOrchestrator())
+    response = TestClient(app, raise_server_exceptions=False).post(
+        "/internal/evals/run",
+        headers=auth_headers(),
+        json={
+            "cases": [
+                {
+                    "case_id": "forged_v1",
+                    "category": "pipeline",
+                    "input": "合成测试",
+                }
+            ],
+            "data_classification": "synthetic",
+        },
+    )
+
+    assert response.status_code == 500
+    assert "旧版终审" not in response.text
+
+
+def test_failure_response_exposes_only_fixed_rejection_enums() -> None:
+    private_candidate = "Private candidate that must not enter API telemetry."
+    private_rationale = "Private verifier rationale that must not enter API telemetry."
+    private_review_payload = "Private Review payload must not enter API telemetry."
+    authorize(eval_settings(), ContractFailureOrchestrator())
+
+    response = TestClient(app).post(
+        "/internal/evals/run",
+        headers=auth_headers(),
+        json={
+            "cases": [
+                {
+                    "case_id": "contract_failure",
+                    "category": "pipeline",
+                    "input": "完全合成的合同失败测试。",
+                }
+            ],
+            "data_classification": "synthetic",
+        },
+    )
+    payload = response.json()
+    failure = payload["cases"][0]["pipeline_failure"]
+
+    assert response.status_code == 200
+    assert failure["reason"] == "review_contract_violation"
+    assert failure["contract_failure_code"] == "verifier_rejected"
+    assert failure["verifier_finding"] == "health_boundary"
+    assert set(failure) == {
+        "stage",
+        "reason",
+        "contract_failure_code",
+        "verifier_finding",
+        "code",
+        "retryable",
+        "content_present",
+        "request_id_present",
+    }
+    assert private_candidate not in response.text
+    assert private_rationale not in response.text
+    assert private_review_payload not in response.text
+    assert final_response_digest(private_candidate) not in response.text
+    assert OPENAI_SECRET not in response.text
+    assert DEEPSEEK_SECRET not in response.text
+
+
+@pytest.mark.parametrize(
+    "pipeline_failure",
+    [
+        {
+            "stage": "review",
+            "reason": "review_contract_violation",
+            "contract_failure_code": "final_checks_not_release_ready",
+            "code": "invalid_schema",
+            "retryable": False,
+            "content_present": True,
+            "request_id_present": False,
+        },
+        {
+            "stage": "review_verifier",
+            "reason": "review_contract_violation",
+            "contract_failure_code": "verifier_rejected",
+            "code": "invalid_schema",
+            "retryable": False,
+            "content_present": True,
+            "request_id_present": False,
+        },
+    ],
+    ids=["review", "verifier"],
+)
+def test_live_api_rejects_forged_failure_without_required_finding(
+    monkeypatch: pytest.MonkeyPatch,
+    pipeline_failure: dict[str, Any],
+) -> None:
+    private_marker = "private-candidate-and-rationale-must-not-escape"
+
+    async def forged_run(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "run_scope": "explicit_cases",
+            "data_classification": "synthetic",
+            "case_count": 1,
+            "passed": False,
+            "pass_count": 0,
+            "fail_count": 1,
+            "duration_ms": 1,
+            "cases": [
+                {
+                    "case_id": "forged_missing_finding",
+                    "category": "pipeline",
+                    "input": private_marker,
+                    "conversation_history": [],
+                    "review_completed": False,
+                    "hard_assertions": [
+                        {
+                            "rule": "synthetic_contract_probe",
+                            "applicable": True,
+                            "passed": False,
+                            "detail": "Synthetic assertion.",
+                        }
+                    ],
+                    "passed": False,
+                    "latency_ms": 1,
+                    "error": "pipeline_failed_closed",
+                    "pipeline_failure": pipeline_failure,
+                }
+            ],
+        }
+
+    monkeypatch.setattr(EvalRunner, "run", forged_run)
+    authorize(eval_settings(), StaticOrchestrator())
+
+    response = TestClient(app, raise_server_exceptions=False).post(
+        "/internal/evals/run",
+        headers=auth_headers(),
+        json={
+            "cases": [
+                {
+                    "case_id": "forged_missing_finding",
+                    "category": "pipeline",
+                    "input": "完全合成的当前响应伪造测试。",
+                }
+            ],
+            "data_classification": "synthetic",
+        },
+    )
+
+    assert response.status_code == 500
+    assert private_marker not in response.text
+
+
+def test_review_failure_response_exposes_only_fixed_final_check_enum() -> None:
+    authorize(eval_settings(), ReviewContractFailureOrchestrator())
+
+    response = TestClient(app).post(
+        "/internal/evals/run",
+        headers=auth_headers(),
+        json={
+            "cases": [
+                {
+                    "case_id": "review_contract_failure",
+                    "category": "pipeline",
+                    "input": "完全合成的第一道审核失败测试。",
+                }
+            ],
+            "data_classification": "synthetic",
+        },
+    )
+    failure = response.json()["cases"][0]["pipeline_failure"]
+
+    assert response.status_code == 200
+    assert failure == {
+        "stage": "review",
+        "reason": "review_contract_violation",
+        "contract_failure_code": "final_checks_not_release_ready",
+        "review_final_finding": "diagnostic_self_screening",
+        "code": "invalid_schema",
+        "retryable": False,
+        "content_present": True,
+        "request_id_present": False,
+    }
+    assert "verifier_finding" not in failure
+    assert "rationale" not in response.text
     assert OPENAI_SECRET not in response.text
     assert DEEPSEEK_SECRET not in response.text
 

@@ -8,9 +8,11 @@ from app.ai.gateway import (
     gateway_error_retryable,
 )
 from app.ai.context import ConversationContextMessage
+from app.ai.models import ReviewFinalFinding, VerifierRejectionFinding
 from app.ai.orchestrator import (
     AgentPipelineError,
     MultiAgentOrchestrator,
+    PipelineContractFailureCode,
     PipelineRunState,
 )
 from app.evals.assertions import evaluate_failure, evaluate_success
@@ -20,6 +22,9 @@ from app.evals.models import (
     EvalCaseReport,
     EvalCaseSpec,
     EvalErrorCode,
+    EvalFinalVerificationReport,
+    EvalFinalResponseChecksReport,
+    EvalPipelineFailureReason,
     EvalPipelineFailureReport,
     EvalReviewReport,
     EvalRunReport,
@@ -37,6 +42,34 @@ def _redact_possible_secret(value: str) -> str:
 
 def _redact_optional(value: str | None) -> str | None:
     return _redact_possible_secret(value) if value is not None else None
+
+
+def _case_timeout_diagnostic(
+    run_state: PipelineRunState,
+) -> GatewayDiagnostic | None:
+    """Describe an outer case deadline without exposing exception text."""
+
+    if run_state.current_stage is None:
+        return None
+
+    elapsed_ms = None
+    if run_state.stage_started_at is not None:
+        elapsed_ms = min(
+            max(round((perf_counter() - run_state.stage_started_at) * 1000), 0),
+            3_600_000,
+        )
+    stage_timeout_ms = None
+    if run_state.stage_timeout_seconds is not None:
+        stage_timeout_ms = min(
+            max(round(run_state.stage_timeout_seconds * 1000), 1),
+            3_600_000,
+        )
+    return GatewayDiagnostic(
+        code="provider_timeout",
+        timeout_origin="case_deadline",
+        stage_elapsed_ms=elapsed_ms,
+        stage_timeout_ms=stage_timeout_ms,
+    )
 
 
 class EvalRunner:
@@ -110,11 +143,7 @@ class EvalRunner:
                     timeout=self._case_timeout_seconds,
                 )
         except TimeoutError:
-            timeout_diagnostic = (
-                GatewayDiagnostic(code="provider_timeout")
-                if run_state.current_stage is not None
-                else None
-            )
+            timeout_diagnostic = _case_timeout_diagnostic(run_state)
             return self._failure_report(
                 case,
                 started,
@@ -129,29 +158,53 @@ class EvalRunner:
                 "pipeline_failed_closed",
                 pipeline_stage=pipeline_error.stage,
                 pipeline_diagnostic=pipeline_error.diagnostic,
+                pipeline_reason=pipeline_error.reason,
+                contract_failure_code=pipeline_error.contract_failure_code,
+                review_final_finding=pipeline_error.review_final_finding,
+                verifier_finding=pipeline_error.verifier_finding,
             )
         except Exception:
             return self._failure_report(case, started, "internal_error")
 
         assertions = evaluate_success(case, result)
+        final_response = _redact_possible_secret(result.response)
+        final_response_redacted = final_response != result.response
         review_report = None
         if result.review is not None:
             review_report = EvalReviewReport(
-                approved=result.review.approved,
-                issues=result.review.issues,
+                contract_version=result.review.contract_version,
+                draft_disposition=result.review.draft_disposition,
+                draft_findings=result.review.draft_findings,
+                final_checks=EvalFinalResponseChecksReport(
+                    **result.review.final_checks.model_dump(),
+                    release_ready=result.review.final_checks.release_ready,
+                ),
                 risk_level=result.review.risk_level,
                 rationale=_redact_possible_secret(result.review.rationale),
             )
+        verification_report = None
+        if result.verification is not None and not final_response_redacted:
+            verification_report = EvalFinalVerificationReport(
+                contract_version=result.verification.contract_version,
+                target_digest=result.verification.target_digest,
+                gate_action=result.verification.gate_action,
+                primary_finding=result.verification.primary_finding,
+                named_guess_count=result.verification.named_guess_count,
+            )
+        review_completed = result.review is not None and (
+            result.response_source != "review" or verification_report is not None
+        )
         return EvalCaseReport(
             case_id=case.case_id,
             category=case.category,
             input=case.input,
             conversation_history=case.conversation_history,
             reflection_draft=_redact_optional(result.reflection_draft),
-            final_response=_redact_possible_secret(result.response),
+            final_response=final_response,
             mode=result.mode,
             support_mode=result.support_mode,
             response_source=result.response_source,
+            bounded_response_kind=result.bounded_response_kind,
             risk_level=result.risk_level,
             safety_guard_applied=result.response_source in {
                 "safety_guard",
@@ -164,8 +217,9 @@ class EvalRunner:
                 if result.memory_candidate is not None
                 else None
             ),
-            review_completed=result.review is not None,
+            review_completed=review_completed,
             review=review_report,
+            review_verification=verification_report,
             hard_assertions=assertions,
             passed=all(
                 assertion.passed for assertion in assertions if assertion.applicable
@@ -181,17 +235,30 @@ class EvalRunner:
         *,
         pipeline_stage: PipelineStage | None = None,
         pipeline_diagnostic: GatewayDiagnostic | None = None,
+        pipeline_reason: EvalPipelineFailureReason = "gateway_error",
+        contract_failure_code: PipelineContractFailureCode | None = None,
+        review_final_finding: ReviewFinalFinding | None = None,
+        verifier_finding: VerifierRejectionFinding | None = None,
     ) -> EvalCaseReport:
         pipeline_failure = None
         if pipeline_stage is not None and pipeline_diagnostic is not None:
             pipeline_failure = EvalPipelineFailureReport(
                 stage=pipeline_stage,
+                reason=pipeline_reason,
+                contract_failure_code=contract_failure_code,
+                review_final_finding=review_final_finding,
+                verifier_finding=verifier_finding,
                 code=pipeline_diagnostic.code,
                 retryable=gateway_error_retryable(pipeline_diagnostic.code),
                 content_present=pipeline_diagnostic.content_present,
                 request_id_present=pipeline_diagnostic.request_id_present,
                 http_status=pipeline_diagnostic.http_status,
                 finish_reason=pipeline_diagnostic.finish_reason,
+                timeout_origin=pipeline_diagnostic.timeout_origin,
+                attempt_index=pipeline_diagnostic.attempt_index,
+                attempt_limit=pipeline_diagnostic.attempt_limit,
+                stage_elapsed_ms=pipeline_diagnostic.stage_elapsed_ms,
+                stage_timeout_ms=pipeline_diagnostic.stage_timeout_ms,
             )
         return EvalCaseReport(
             case_id=case.case_id,

@@ -22,6 +22,15 @@ The hosted project also has the conversation-history migrations applied:
 - `0005_backend_only_conversation_writes.sql` removes direct browser message
   inserts, so only the backend can persist a complete reviewed pair.
 
+`0006_dual_gate_message_provenance.sql` is the next local migration and has not
+been applied to the hosted project by this repository change. It marks existing
+durable assistant turns as `legacy`, records Review v2 + Final Verification v2
+on new turns, and restricts bounded-response provenance to the four supported
+kinds. Apply this migration before deploying backend code that selects the new
+columns. Legacy pairs and historical Review v2 / Verifier v1 pairs remain
+visible in history, but only `2`/`2` pairs are eligible for model context or
+current idempotent replay.
+
 The hosted migration ledger starts with the confirmed-memory migration even
 though the initial schema is present. Do not replay `0001_initial_schema.sql`
 against the existing project merely to fill that historical ledger gap.

@@ -28,9 +28,12 @@ Do not propose:
 When uncertain, set `should_propose` to false. Candidate confidence may only be
 `low` or `medium`; confirmation belongs to the user and is never inferred.
 
-The candidate content must use neutral, revisable language and preserve that it
-came from the user. The confirmation prompt must clearly ask whether the
-candidate is accurate and whether the user wants PAS to remember it.
+For a proposed candidate, copy the complete `user_message` exactly into
+`content`; do not extract a substring, paraphrase it, or remove surrounding
+negation or attribution. The server supplies a neutral confirmation prompt and
+will discard any candidate that is not a verbatim full-message copy. This
+source constraint prevents Memory output from adding a diagnosis, identity, or
+meaning that the user did not write.
 
 Return only the requested structured decision. Keep `rationale` short,
 specific, and internal.
