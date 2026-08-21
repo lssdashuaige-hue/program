@@ -1,0 +1,12 @@
+{
+  "name": "pas-database-rehearsal",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "rehearse": "node rehearse.mjs"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "0.5.5",
+    "@electric-sql/pglite-tools": "0.4.5"
+  }
+}

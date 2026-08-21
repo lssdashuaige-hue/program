@@ -42,6 +42,14 @@ ownership read. This migration must follow `0006` and must not be deployed
 until the migration ledger, verified backup, maintenance window, and two-user
 PostgREST isolation test are ready.
 
+The isolated rehearsal in `rehearsal/` replays migrations `0001` through
+`0007`, validates PostgreSQL permissions and failure atomicity, and exercises
+forward freeze plus backup recovery using synthetic data only. Run
+`npm run rehearse` from that directory. A passing local rehearsal is evidence
+for requesting a read-only hosted preflight, not permission to migrate the
+hosted project. The complete gate checklist is in
+`docs/pas/PAS-027-DATABASE-MIGRATION-RUNBOOK.md`.
+
 The hosted migration ledger starts with the confirmed-memory migration even
 though the initial schema is present. Do not replay `0001_initial_schema.sql`
 against the existing project merely to fill that historical ledger gap.

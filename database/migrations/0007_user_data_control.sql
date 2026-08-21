@@ -82,6 +82,29 @@ alter table public.memories
   add column if not exists paused_at timestamptz,
   add column if not exists superseded_at timestamptz;
 
+-- Existing rows can only become source-quote version roots when the database
+-- can prove that they are confirmed, non-empty, owner-matched copies of a
+-- user message. Abort instead of silently upgrading unverified legacy text.
+do $$
+begin
+  if exists (
+    select 1
+    from public.memories memory
+    left join public.messages source
+      on source.id = memory.source_message_id
+    where memory.confirmed is distinct from true
+       or char_length(memory.content) not between 1 and 8000
+       or source.id is null
+       or source.user_id is distinct from memory.user_id
+       or source.role is distinct from 'user'
+       or source.content is distinct from memory.content
+  ) then
+    raise exception 'legacy memories require confirmed, exact owned user-message sources before PAS-027 migration'
+      using errcode = '23514';
+  end if;
+end;
+$$;
+
 update public.memories
 set lineage_id = coalesce(lineage_id, id),
     original_content = coalesce(original_content, content),
@@ -107,14 +130,18 @@ alter table public.memories
 alter table public.memories
   drop constraint if exists memories_lineage_fk,
   drop constraint if exists memories_supersedes_fk,
+  drop constraint if exists memories_id_user_id_key,
   drop constraint if exists memories_data_control_shape_check,
   drop constraint if exists memories_lineage_version_key;
 
 alter table public.memories
+  add constraint memories_id_user_id_key unique (id, user_id),
   add constraint memories_lineage_fk
-    foreign key (lineage_id) references public.memories(id) on delete cascade,
+    foreign key (lineage_id, user_id)
+    references public.memories(id, user_id) on delete cascade,
   add constraint memories_supersedes_fk
-    foreign key (supersedes_id) references public.memories(id) on delete cascade,
+    foreign key (supersedes_id, user_id)
+    references public.memories(id, user_id) on delete cascade,
   add constraint memories_lineage_version_key unique (lineage_id, version),
   add constraint memories_data_control_shape_check check (
     char_length(content) between 1 and 8000
@@ -145,6 +172,38 @@ alter table public.memories
 drop policy if exists "memories_insert_confirmed_own" on public.memories;
 drop policy if exists "memories_update_confirmed_own" on public.memories;
 
+-- The messages table intentionally exposes only a public column projection to
+-- authenticated clients. Use a narrow owner-bound predicate so the memory
+-- policy can verify the private message owner without granting direct access
+-- to messages.user_id.
+create or replace function public.is_exact_owned_user_message(
+  p_message_id uuid,
+  p_content text
+)
+returns boolean
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select (select auth.uid()) is not null
+    and exists (
+      select 1
+      from public.messages source
+      where source.id = p_message_id
+        and source.user_id = (select auth.uid())
+        and source.role = 'user'
+        and source.content = p_content
+    )
+$$;
+
+revoke all on function public.is_exact_owned_user_message(uuid, text)
+from public;
+revoke all on function public.is_exact_owned_user_message(uuid, text)
+from anon;
+grant execute on function public.is_exact_owned_user_message(uuid, text)
+to authenticated;
+
 create policy "memories_insert_opted_in_source_quote"
 on public.memories
 for insert
@@ -166,14 +225,7 @@ with check (
   and paused_at is null
   and superseded_at is null
   and content = original_content
-  and exists (
-    select 1
-    from public.messages m
-    where m.id = source_message_id
-      and m.user_id = (select auth.uid())
-      and m.role = 'user'
-      and m.content = content
-  )
+  and public.is_exact_owned_user_message(source_message_id, content)
 );
 
 create policy "memories_update_status_own"
@@ -247,8 +299,9 @@ begin
   if not found then
     return;
   end if;
-  if current_row.status = 'superseded'
-     or current_row.version <> p_expected_version then
+  if p_expected_version is null
+     or current_row.status = 'superseded'
+     or current_row.version is distinct from p_expected_version then
     raise exception 'memory version conflict' using errcode = '40001';
   end if;
 

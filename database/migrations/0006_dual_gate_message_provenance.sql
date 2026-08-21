@@ -1,3 +1,5 @@
+begin;
+
 alter table public.messages
   add column if not exists review_contract_version text,
   add column if not exists verification_contract_version text,
@@ -128,3 +130,5 @@ grant select (
 ) on table public.messages to authenticated;
 
 grant select, insert on table public.messages to service_role;
+
+commit;

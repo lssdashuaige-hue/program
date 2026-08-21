@@ -168,8 +168,10 @@ def test_data_control_migration_makes_memory_explicit_opt_in() -> None:
     assert "add column if not exists memory_enabled_at timestamptz" in sql
     assert "p.memory_enabled = true" in sql
     assert "memories_insert_opted_in_source_quote" in sql
-    assert "m.role = 'user'" in sql
-    assert "m.content = content" in sql
+    assert "function public.is_exact_owned_user_message" in sql
+    assert "source.role = 'user'" in sql
+    assert "source.content = p_content" in sql
+    assert "public.is_exact_owned_user_message(source_message_id, content)" in sql
 
 
 def test_data_control_migration_preserves_source_and_version_lineage() -> None:
@@ -186,6 +188,10 @@ def test_data_control_migration_preserves_source_and_version_lineage() -> None:
     ):
         assert f"add column if not exists {column}" in sql
     assert "memories_lineage_version_key unique (lineage_id, version)" in sql
+    assert "memories_id_user_id_key unique (id, user_id)" in sql
+    assert "foreign key (lineage_id, user_id)" in sql
+    assert "foreign key (supersedes_id, user_id)" in sql
+    assert sql.count("references public.memories(id, user_id) on delete cascade") == 2
     assert "version_origin = 'source_quote'" in sql
     assert "version_origin = 'user_revision'" in sql
     assert "content = original_content" in sql
@@ -215,3 +221,16 @@ def test_data_control_revision_is_narrow_and_owner_checked() -> None:
     )
     assert "grant update (status, paused_at, updated_at)" in sql
     assert "function public.delete_memory_lineage(uuid)" in sql
+    assert "p_expected_version is null" in sql
+    assert "current_row.version is distinct from p_expected_version" in sql
+
+
+def test_data_control_migration_rejects_unverifiable_legacy_memories() -> None:
+    sql = DATA_CONTROL_MIGRATION.read_text(encoding="utf-8").lower()
+
+    assert "memory.confirmed is distinct from true" in sql
+    assert "source.id is null" in sql
+    assert "source.user_id is distinct from memory.user_id" in sql
+    assert "source.role is distinct from 'user'" in sql
+    assert "source.content is distinct from memory.content" in sql
+    assert "using errcode = '23514'" in sql
