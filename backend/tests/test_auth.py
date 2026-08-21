@@ -23,7 +23,10 @@ def test_supabase_auth_validates_with_auth_server() -> None:
         assert request.url.path == "/auth/v1/user"
         assert request.headers["apikey"] == "publishable-key"
         assert request.headers["authorization"] == "Bearer user-access-token"
-        return httpx.Response(200, json={"id": str(user_id)})
+        return httpx.Response(
+            200,
+            json={"id": str(user_id), "email": "user@example.com"},
+        )
 
     service = SupabaseAuthService(
         supabase_url="https://project.supabase.co",
@@ -33,7 +36,11 @@ def test_supabase_auth_validates_with_auth_server() -> None:
 
     user = asyncio.run(service.authenticate("user-access-token"))
 
-    assert user == AuthenticatedUser(id=user_id, access_token="user-access-token")
+    assert user == AuthenticatedUser(
+        id=user_id,
+        access_token="user-access-token",
+        email="user@example.com",
+    )
     assert "user-access-token" not in repr(user)
 
 

@@ -38,6 +38,22 @@ from app.persistence import (
 
 router = APIRouter(prefix="/chat", tags=["reflection"])
 CHAT_TIMEOUT_SECONDS = PIPELINE_TIMEOUT_SECONDS
+MAX_TEMPORARY_HISTORY_MESSAGES = 6
+MAX_TEMPORARY_HISTORY_CHARACTERS = 12_000
+
+
+class TemporaryHistoryMessage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    role: Literal["user"] = "user"
+    content: str = Field(min_length=1, max_length=8000)
+
+    @field_validator("content")
+    @classmethod
+    def require_visible_content(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("A temporary history message cannot be blank.")
+        return value
 
 
 class ChatRequest(BaseModel):
@@ -45,8 +61,13 @@ class ChatRequest(BaseModel):
 
     message: str = Field(min_length=1, max_length=8000)
     response_preference: ResponsePreference | None = None
+    persistence_mode: Literal["saved", "temporary"] = "saved"
     conversation_id: UUID | None = None
     client_turn_id: UUID | None = None
+    temporary_history: list[TemporaryHistoryMessage] = Field(
+        default_factory=list,
+        max_length=MAX_TEMPORARY_HISTORY_MESSAGES,
+    )
 
     @field_validator("message")
     @classmethod
@@ -57,6 +78,19 @@ class ChatRequest(BaseModel):
 
     @model_validator(mode="after")
     def resumed_conversation_requires_turn_id(self) -> "ChatRequest":
+        if self.persistence_mode == "temporary":
+            if self.conversation_id is not None or self.client_turn_id is not None:
+                raise ValueError(
+                    "A temporary session cannot carry durable record identifiers."
+                )
+            if (
+                sum(len(item.content) for item in self.temporary_history)
+                > MAX_TEMPORARY_HISTORY_CHARACTERS
+            ):
+                raise ValueError("Temporary session context is too large.")
+            return self
+        if self.temporary_history:
+            raise ValueError("Saved conversations cannot trust client history.")
         if self.conversation_id is not None and self.client_turn_id is None:
             raise ValueError("A resumed conversation requires a client turn ID.")
         return self
@@ -64,6 +98,10 @@ class ChatRequest(BaseModel):
 
 class PersistenceNotRequested(BaseModel):
     status: Literal["not_requested"] = "not_requested"
+
+
+class PersistenceTemporary(BaseModel):
+    status: Literal["not_saved_temporary"] = "not_saved_temporary"
 
 
 class PersistenceSaved(BaseModel):
@@ -85,6 +123,7 @@ class PersistenceFailed(BaseModel):
 
 PersistenceResult = (
     PersistenceNotRequested
+    | PersistenceTemporary
     | PersistenceSaved
     | PersistenceNotSaved
     | PersistenceFailed
@@ -240,8 +279,15 @@ async def chat(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    conversation_history: tuple[ConversationContextMessage, ...] = ()
-    if user is not None and request.client_turn_id is not None:
+    conversation_history: tuple[ConversationContextMessage, ...] = tuple(
+        ConversationContextMessage(role="user", content=item.content)
+        for item in request.temporary_history
+    )
+    if (
+        request.persistence_mode == "saved"
+        and user is not None
+        and request.client_turn_id is not None
+    ):
         if persistence is None:
             if request.conversation_id is not None:
                 raise _history_error(PersistenceUnavailable("Not configured."))
@@ -282,6 +328,25 @@ async def chat(
             ) as error:
                 raise _history_error(error) from error
 
+    memory_allowed = False
+    if (
+        request.persistence_mode == "saved"
+        and user is not None
+        and persistence is not None
+    ):
+        try:
+            memory_allowed = (
+                await persistence.get_memory_settings(user)
+            ).memory_enabled
+        except (
+            PersistenceConflict,
+            PersistenceUnauthorized,
+            PersistenceUnavailable,
+        ):
+            # A preference read failure must fail closed for memory without
+            # taking away the reviewed conversation response.
+            memory_allowed = False
+
     if orchestrator is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -294,6 +359,7 @@ async def chat(
             response_kwargs["conversation_history"] = conversation_history
         if request.response_preference is not None:
             response_kwargs["response_preference"] = request.response_preference
+        response_kwargs["allow_memory"] = memory_allowed
         response_call = orchestrator.respond(
             request.message,
             **response_kwargs,
@@ -305,6 +371,15 @@ async def chat(
     except (AgentPipelineError, TimeoutError):
         result = safe_fallback_result(request.message)
 
+    if request.persistence_mode == "temporary":
+        return ChatResponse(
+            response=result.response,
+            mode=result.mode,
+            support_mode=result.support_mode,
+            response_source=result.response_source,
+            persistence=PersistenceTemporary(),
+        )
+
     if user is None or request.client_turn_id is None:
         return ChatResponse(
             response=result.response,
@@ -312,7 +387,6 @@ async def chat(
             support_mode=result.support_mode,
             response_source=result.response_source,
             persistence=PersistenceNotRequested(),
-            memory_candidate=result.memory_candidate,
         )
 
     if result.response_source in {"safety_guard", "review_safety_envelope"}:
@@ -390,6 +464,8 @@ async def chat(
         response_source=result.response_source,
         persistence=_saved_persistence(saved),
         memory_candidate=(
-            None if saved.already_saved else result.memory_candidate
+            None
+            if saved.already_saved or not memory_allowed
+            else result.memory_candidate
         ),
     )

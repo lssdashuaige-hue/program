@@ -24,6 +24,7 @@ export type ResponseSource =
 
 export type PersistenceResult =
   | { status: "not_requested" }
+  | { status: "not_saved_temporary" }
   | {
       status: "saved" | "already_saved";
       conversation_id: string;
@@ -54,8 +55,10 @@ const apiUrl = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000").repl
 );
 
 type SendReflectionOptions = {
-  clientTurnId: string;
+  clientTurnId?: string;
   conversationId: string | null;
+  persistenceMode?: "saved" | "temporary";
+  temporaryHistory?: Array<{ role: "user"; content: string }>;
   responsePreference?: ResponsePreference | null;
   signal?: AbortSignal;
 };
@@ -74,6 +77,10 @@ function normalizePersistence(
 
   if (value.status === "not_requested") {
     return { status: "not_requested" };
+  }
+
+  if (value.status === "not_saved_temporary") {
+    return { status: "not_saved_temporary" };
   }
 
   if (value.status === "saved" || value.status === "already_saved") {
@@ -151,6 +158,7 @@ export async function sendReflection(
   }
 
   const accessToken = session?.access_token;
+  const persistenceMode = options.persistenceMode ?? "saved";
   if (options.conversationId && !accessToken) {
     throw new Error("登录状态已经失效。请重新登录后继续这段探索。");
   }
@@ -167,9 +175,14 @@ export async function sendReflection(
     headers,
     body: JSON.stringify({
       message,
+      persistence_mode: persistenceMode,
       conversation_id: options.conversationId ?? undefined,
       client_turn_id: options.clientTurnId,
       response_preference: options.responsePreference ?? undefined,
+      temporary_history:
+        persistenceMode === "temporary"
+          ? (options.temporaryHistory ?? [])
+          : undefined,
     }),
     signal: options.signal,
   });

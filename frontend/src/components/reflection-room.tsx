@@ -26,6 +26,7 @@ type FailedRequest = {
 };
 
 type RequestStatus = "idle" | "sending" | "stopping";
+type SessionMode = "saved" | "temporary";
 
 type ComposerSnapshot = {
   input: string;
@@ -69,6 +70,8 @@ function titleFromMessage(message: string): string {
 
 function persistenceMessage(persistence: PersistenceResult): string | null {
   switch (persistence.status) {
+    case "not_saved_temporary":
+      return "这是临时会话：本页近期原话只随下一轮请求传递，不写入探索历史，也不会形成候选记忆。";
     case "already_saved":
       return "这次重试已与原来保存的内容对齐，没有重复写入历史。";
     case "not_saved_support":
@@ -124,6 +127,7 @@ export function ReflectionRoom({
   const [conversationId, setConversationId] = useState<string | null>(
     initialConversation?.id ?? null,
   );
+  const [sessionMode, setSessionMode] = useState<SessionMode>("saved");
   const [conversationTitle, setConversationTitle] = useState(
     initialConversation?.title?.trim() || null,
   );
@@ -158,8 +162,18 @@ export function ReflectionRoom({
 
     try {
       const result = await sendReflection(message, {
-        clientTurnId,
-        conversationId,
+        clientTurnId: sessionMode === "saved" ? clientTurnId : undefined,
+        conversationId: sessionMode === "saved" ? conversationId : null,
+        persistenceMode: sessionMode,
+        temporaryHistory:
+          sessionMode === "temporary"
+            ? messages
+                .filter(
+                  (item) => item.role === "user" && item.id !== messageId,
+                )
+                .slice(-6)
+                .map((item) => ({ role: "user" as const, content: item.content }))
+            : undefined,
         responsePreference: preference,
         signal: controller.signal,
       });
@@ -201,7 +215,7 @@ export function ReflectionRoom({
             ? {
                 ...result.memory_candidate,
                 source_message_id:
-                  savedPersistence?.assistant_message_id,
+                  savedPersistence?.user_message_id,
               }
             : null,
       );
@@ -217,7 +231,9 @@ export function ReflectionRoom({
 
       if (caught instanceof Error && caught.name === "AbortError") {
         setRequestNotice(
-          "已停止等待，你的文字已经放回输入框。若服务端此前已完成，使用同一内容重试会恢复已保存的结果。",
+          sessionMode === "saved"
+            ? "已停止等待，你的文字已经放回输入框。若服务端此前已完成，使用同一内容重试会恢复已保存的结果。"
+            : "已停止等待，你的文字已经放回输入框。临时会话不会留下可恢复的服务端记录。",
         );
       } else {
         setError(requestErrorMessage(caught));
@@ -306,6 +322,38 @@ export function ReflectionRoom({
               : "今天，你想从哪里开始？"}
           </h1>
         </div>
+        {!initialConversation && messages.length === 1 && (
+          <fieldset className="mt-5" disabled={pending}>
+            <legend className="text-sm font-medium">这次探索要不要进入历史？</legend>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {(
+                [
+                  ["saved", "保存到探索历史"],
+                  ["temporary", "临时会话"],
+                ] as const
+              ).map(([value, label]) => (
+                <button
+                  aria-pressed={sessionMode === value}
+                  className={
+                    sessionMode === value
+                      ? "rounded-full border border-[var(--ink)] bg-[var(--ink)] px-4 py-2 text-sm font-medium text-white"
+                      : "rounded-full border border-[var(--line-strong)] bg-[var(--surface)] px-4 py-2 text-sm text-[var(--muted)]"
+                  }
+                  key={value}
+                  onClick={() => setSessionMode(value)}
+                  type="button"
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <p className="mt-2 text-xs leading-5 text-[var(--muted)]">
+              {sessionMode === "temporary"
+                ? "不会创建历史或记忆；刷新页面后，本页内容无法恢复。"
+                : "登录后，只有通过审核且成功写入的原话与最终回应会保存。"}
+            </p>
+          </fieldset>
+        )}
       </header>
       {!conversationId && messages.length === 1 && input.length === 0 && (
         <section className="mb-7" aria-labelledby="starting-prompts-title">

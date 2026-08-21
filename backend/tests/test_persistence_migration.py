@@ -8,6 +8,12 @@ MIGRATION = (
     / "migrations"
     / "0006_dual_gate_message_provenance.sql"
 )
+DATA_CONTROL_MIGRATION = (
+    Path(__file__).resolve().parents[2]
+    / "database"
+    / "migrations"
+    / "0007_user_data_control.sql"
+)
 
 
 def test_dual_gate_migration_backfills_existing_turns_as_legacy() -> None:
@@ -147,3 +153,65 @@ def test_server_permissions_and_existing_rls_policy_are_preserved() -> None:
     assert "row level security" not in sql
     assert "create policy" not in sql
     assert "drop policy" not in sql
+
+
+def test_data_control_migration_makes_memory_explicit_opt_in() -> None:
+    sql = DATA_CONTROL_MIGRATION.read_text(encoding="utf-8").lower()
+
+    assert "alter column memory_enabled set default false" in sql
+    assert "function public.set_memory_enabled(boolean)" in sql
+    assert "rpc/set_memory_enabled" not in sql
+    assert "revoke insert, update, delete on table public.profiles" in sql
+    assert "grant update (display_name) on table public.profiles" in sql
+    assert "memory_enabled_at = excluded.memory_enabled_at" in sql
+    assert "set memory_enabled = false" in sql
+    assert "add column if not exists memory_enabled_at timestamptz" in sql
+    assert "p.memory_enabled = true" in sql
+    assert "memories_insert_opted_in_source_quote" in sql
+    assert "m.role = 'user'" in sql
+    assert "m.content = content" in sql
+
+
+def test_data_control_migration_preserves_source_and_version_lineage() -> None:
+    sql = DATA_CONTROL_MIGRATION.read_text(encoding="utf-8").lower()
+
+    for column in (
+        "lineage_id",
+        "supersedes_id",
+        "original_content",
+        "version_origin",
+        "confirmed_at",
+        "paused_at",
+        "superseded_at",
+    ):
+        assert f"add column if not exists {column}" in sql
+    assert "memories_lineage_version_key unique (lineage_id, version)" in sql
+    assert "version_origin = 'source_quote'" in sql
+    assert "version_origin = 'user_revision'" in sql
+    assert "content = original_content" in sql
+    assert "original_content = current_row.original_content" not in sql
+    assert "current_row.original_content" in sql
+    assert "current_row.id" in sql
+    assert "current_row.version + 1" in sql
+
+
+def test_data_control_revision_is_narrow_and_owner_checked() -> None:
+    sql = DATA_CONTROL_MIGRATION.read_text(encoding="utf-8").lower()
+
+    assert "security definer" in sql
+    assert "set search_path = ''" in sql
+    assert sql.count("user_id = (select auth.uid())") >= 3
+    assert (
+        "revoke all on function public.revise_memory(uuid, integer, text) "
+        "from public"
+    ) in sql
+    assert (
+        "grant execute on function public.revise_memory(uuid, integer, text)"
+        in sql
+    )
+    assert (
+        "revoke insert, update, delete on table public.memories from authenticated"
+        in sql
+    )
+    assert "grant update (status, paused_at, updated_at)" in sql
+    assert "function public.delete_memory_lineage(uuid)" in sql

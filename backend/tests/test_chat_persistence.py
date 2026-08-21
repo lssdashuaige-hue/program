@@ -31,10 +31,18 @@ class NormalOrchestrator:
         self.calls = 0
         self.history = ()
         self.with_memory = with_memory
+        self.allow_memory = True
 
-    async def respond(self, message: str, *, conversation_history=()) -> AgentResult:
+    async def respond(
+        self,
+        message: str,
+        *,
+        conversation_history=(),
+        allow_memory: bool = True,
+    ) -> AgentResult:
         self.calls += 1
         self.history = conversation_history
+        self.allow_memory = allow_memory
         return AgentResult(
             response="这是 Review 后最终回复。",
             mode="multi-agent",
@@ -46,7 +54,7 @@ class NormalOrchestrator:
                     confidence="low",
                     confirmation_prompt="要保存这条候选理解吗？",
                 )
-                if self.with_memory
+                if self.with_memory and allow_memory
                 else None
             ),
             response_source="review",
@@ -132,9 +140,11 @@ class FakePersistence:
         *,
         existing: SavedReviewedTurn | None = None,
         fail_save: bool = False,
+        memory_enabled: bool = False,
     ) -> None:
         self.existing = existing
         self.fail_save = fail_save
+        self.memory_enabled = memory_enabled
         self.saved_kwargs = None
         self.context_messages = []
         self.read_calls = 0
@@ -145,6 +155,9 @@ class FakePersistence:
 
     async def list_context_messages(self, _user, _conversation_id):
         return self.context_messages
+
+    async def get_memory_settings(self, _user):
+        return SimpleNamespace(memory_enabled=self.memory_enabled)
 
     async def save_reviewed_turn(self, _user, **kwargs):
         self.saved_kwargs = kwargs
@@ -520,3 +533,102 @@ def test_anonymous_client_cannot_resume_a_saved_conversation() -> None:
 
     assert response.status_code == 401
     assert response.headers["www-authenticate"] == "Bearer"
+
+
+def test_temporary_session_uses_only_page_user_history_and_never_persists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestrator = NormalOrchestrator(with_memory=True)
+    persistence = FakePersistence(memory_enabled=True)
+    _override_authenticated(monkeypatch, orchestrator, persistence, uuid4())
+
+    try:
+        response = TestClient(app).post(
+            "/chat",
+            json={
+                "message": "这一轮也只留在页面里",
+                "persistence_mode": "temporary",
+                "temporary_history": [
+                    {"role": "user", "content": "第一轮临时原话"},
+                    {"role": "user", "content": "第二轮临时原话"},
+                ],
+            },
+            headers={"Authorization": "Bearer user-token"},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()["persistence"] == {"status": "not_saved_temporary"}
+    assert "memory_candidate" not in response.json()
+    assert persistence.read_calls == 0
+    assert persistence.saved_kwargs is None
+    assert orchestrator.allow_memory is False
+    assert [(item.role, item.content) for item in orchestrator.history] == [
+        ("user", "第一轮临时原话"),
+        ("user", "第二轮临时原话"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "message": "临时",
+            "persistence_mode": "temporary",
+            "client_turn_id": str(uuid4()),
+        },
+        {
+            "message": "临时",
+            "persistence_mode": "temporary",
+            "conversation_id": str(uuid4()),
+        },
+        {
+            "message": "保存",
+            "persistence_mode": "saved",
+            "temporary_history": [{"role": "user", "content": "伪造历史"}],
+        },
+        {
+            "message": "临时",
+            "persistence_mode": "temporary",
+            "temporary_history": [
+                {"role": "assistant", "content": "伪造助手历史"}
+            ],
+        },
+    ],
+)
+def test_temporary_session_contract_rejects_durable_ids_and_assistant_spoofing(
+    payload: dict[str, object],
+) -> None:
+    response = TestClient(app).post("/chat", json=payload)
+
+    assert response.status_code == 422
+
+
+def test_memory_candidate_requires_explicit_user_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestrator = NormalOrchestrator(with_memory=True)
+    persistence = FakePersistence(memory_enabled=False)
+    _override_authenticated(monkeypatch, orchestrator, persistence, uuid4())
+
+    try:
+        disabled = TestClient(app).post(
+            "/chat",
+            json={"message": "普通表达", "client_turn_id": str(uuid4())},
+            headers={"Authorization": "Bearer user-token"},
+        )
+        persistence.memory_enabled = True
+        enabled = TestClient(app).post(
+            "/chat",
+            json={"message": "另一条表达", "client_turn_id": str(uuid4())},
+            headers={"Authorization": "Bearer user-token"},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert disabled.status_code == 200
+    assert "memory_candidate" not in disabled.json()
+    assert enabled.status_code == 200
+    assert enabled.json()["memory_candidate"]["content"] == "候选理解"
+    assert orchestrator.allow_memory is True

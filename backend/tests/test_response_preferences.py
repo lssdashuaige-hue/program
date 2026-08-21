@@ -23,7 +23,11 @@ from app.ai.review_agent import ReviewAgent
 from app.api.chat import get_orchestrator
 from app.auth import AuthenticatedUser
 from app.main import app
-from app.persistence import SavedReviewedTurn, get_optional_persistence
+from app.persistence import (
+    MemorySettingsRecord,
+    SavedReviewedTurn,
+    get_optional_persistence,
+)
 from tests.review_fixtures import review_decision, verification_decision
 
 
@@ -178,12 +182,14 @@ class CapturingOrchestrator:
         *,
         conversation_history=(),
         response_preference: ResponsePreference | None = None,
+        allow_memory: bool = True,
     ) -> AgentResult:
         self.calls.append(
             {
                 "message": message,
                 "conversation_history": conversation_history,
                 "response_preference": response_preference,
+                "allow_memory": allow_memory,
             }
         )
         return reviewed_result()
@@ -214,6 +220,7 @@ def test_chat_accepts_each_preference_without_rewriting_the_message(
             "message": user_message,
             "conversation_history": (),
             "response_preference": preference,
+            "allow_memory": False,
         }
     ]
 
@@ -265,6 +272,13 @@ class FakePersistence:
 
     async def list_context_messages(self, _user, _conversation_id):
         return []
+
+    async def get_memory_settings(self, user):
+        return MemorySettingsRecord(
+            user_id=user.id,
+            memory_enabled=False,
+            memory_enabled_at=None,
+        )
 
     async def save_reviewed_turn(self, _user, **kwargs):
         self.saved_kwargs = kwargs

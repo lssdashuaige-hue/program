@@ -222,6 +222,29 @@ def test_explicit_memory_opt_out_does_not_call_memory_agent() -> None:
     assert gateway.memory_calls == 0
 
 
+def test_server_memory_gate_prevents_candidate_generation() -> None:
+    gateway = MemoryPipelineGateway(
+        memory_decision=MemoryDecision(
+            should_propose=True,
+            kind="reflection",
+            content="这条候选不应生成。",
+            confidence="low",
+            confirmation_prompt="要保存吗？",
+            rationale="Only returned if the server gate failed.",
+        )
+    )
+
+    result = asyncio.run(
+        build_memory_pipeline(gateway).respond(
+            "普通探索内容",
+            allow_memory=False,
+        )
+    )
+
+    assert result.memory_candidate is None
+    assert gateway.memory_calls == 0
+
+
 def test_declined_memory_cannot_contain_candidate_fields() -> None:
     with pytest.raises(ValidationError):
         MemoryDecision(

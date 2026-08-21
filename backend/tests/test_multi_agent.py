@@ -46,7 +46,7 @@ class FakeGateway:
 
 
 class HangingOrchestrator:
-    async def respond(self, user_message: str) -> Any:
+    async def respond(self, user_message: str, **_kwargs: Any) -> Any:
         await asyncio.Event().wait()
         raise AssertionError("unreachable")
 

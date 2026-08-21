@@ -28,6 +28,7 @@ class AuthenticationServiceUnavailable(RuntimeError):
 class AuthenticatedUser:
     id: UUID
     access_token: str = field(repr=False)
+    email: str | None = None
 
 
 class SupabaseAuthService:
@@ -75,12 +76,19 @@ class SupabaseAuthService:
         try:
             payload = response.json()
             user_id = UUID(str(payload["id"]))
+            raw_email = payload.get("email")
+            if raw_email is not None and not isinstance(raw_email, str):
+                raise TypeError("Invalid email field.")
         except (KeyError, TypeError, ValueError) as error:
             raise AuthenticationServiceUnavailable(
                 "Supabase Auth returned an invalid user response."
             ) from error
 
-        return AuthenticatedUser(id=user_id, access_token=access_token)
+        return AuthenticatedUser(
+            id=user_id,
+            access_token=access_token,
+            email=raw_email,
+        )
 
 
 def _authentication_required() -> HTTPException:

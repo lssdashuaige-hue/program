@@ -82,8 +82,8 @@ export function MemoryCandidateCard({
           {candidate.content}
         </blockquote>
         <p className="mt-2 text-xs leading-5 text-[var(--muted)]">
-          为了保留否定、引用和来源语境，当前版本只允许按原话确认。
-          如果这段表述不适合长期保存，请选择暂不保存；带版本记录的编辑功能尚未开放。
+          首次保存必须保留完整原话，避免丢失否定、引用和来源语境。
+          保存后如需修改，会在“记忆与隐私”中创建可追溯的新版本，不会倒写这段原话。
         </p>
       </div>
 

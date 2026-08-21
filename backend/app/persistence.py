@@ -15,8 +15,15 @@ PERSISTENCE_REQUEST_TIMEOUT_SECONDS = 8.0
 MAX_CONTEXT_MESSAGES = 12
 MAX_CONTEXT_CHARACTERS = 16_000
 MAX_HISTORY_MESSAGES = 400
+MAX_MEMORY_RECORDS = 500
+MAX_EXPORT_MESSAGES = 20_000
 ConversationStatus = Literal["active", "archived"]
+ThemeStatus = Literal["exploring", "integrating", "completed", "paused"]
 MessageRole = Literal["user", "assistant", "system"]
+MemoryKind = Literal["experience", "reflection", "pattern", "need"]
+MemoryConfidence = Literal["low", "medium"]
+MemoryStatus = Literal["active", "paused", "superseded"]
+MemoryVersionOrigin = Literal["source_quote", "user_revision"]
 StoredResponseSource = Literal["review"]
 StoredSupportMode = Literal["reflection"]
 StoredRiskLevel = Literal["none"]
@@ -41,6 +48,11 @@ PRIVATE_MESSAGE_SELECT = (
     "bounded_response_kind,created_at"
 )
 OWNED_TURN_LOCATOR_SELECT = "conversation_id,client_turn_id,role"
+MEMORY_SELECT = (
+    "id,user_id,lineage_id,source_message_id,supersedes_id,kind,content,"
+    "original_content,confidence,confirmed,status,version,version_origin,"
+    "confirmed_at,paused_at,superseded_at,created_at,updated_at"
+)
 
 
 class PersistenceUnavailable(RuntimeError):
@@ -67,6 +79,47 @@ class ConversationRecord(BaseModel):
     id: UUID
     title: str | None = None
     status: ConversationStatus
+    created_at: datetime
+    updated_at: datetime
+
+
+class MemorySettingsRecord(BaseModel):
+    memory_enabled: bool = False
+    memory_enabled_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class ProfileExportRecord(BaseModel):
+    display_name: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ThemeRecord(BaseModel):
+    id: UUID
+    title: str
+    status: ThemeStatus
+    created_at: datetime
+    updated_at: datetime
+
+
+class MemoryRecord(BaseModel):
+    id: UUID
+    user_id: UUID = Field(exclude=True)
+    lineage_id: UUID
+    source_message_id: UUID | None
+    supersedes_id: UUID | None = None
+    kind: MemoryKind
+    content: str
+    original_content: str
+    confidence: MemoryConfidence
+    confirmed: Literal[True]
+    status: MemoryStatus
+    version: int = Field(ge=1)
+    version_origin: MemoryVersionOrigin
+    confirmed_at: datetime
+    paused_at: datetime | None = None
+    superseded_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -272,12 +325,18 @@ class SupabasePersistence:
         params: Mapping[str, str | int] | None = None,
         json_body: Any | None = None,
         return_representation: bool = False,
+        prefer: str | None = None,
     ) -> httpx.Response:
         headers = self._user_headers(access_token)
         if json_body is not None:
             headers["Content-Type"] = "application/json"
+        preferences: list[str] = []
+        if prefer is not None:
+            preferences.append(prefer)
         if return_representation:
-            headers["Prefer"] = "return=representation"
+            preferences.append("return=representation")
+        if preferences:
+            headers["Prefer"] = ",".join(preferences)
 
         request_kwargs: dict[str, Any] = {
             "headers": headers,
@@ -769,6 +828,382 @@ class SupabasePersistence:
         rows = self._parse_rows(response, ConversationRecord)
         return bool(rows)
 
+    async def get_memory_settings(
+        self,
+        user: AuthenticatedUser,
+    ) -> MemorySettingsRecord:
+        response = await self._request(
+            "GET",
+            "profiles",
+            access_token=user.access_token,
+            params={
+                "select": "memory_enabled,memory_enabled_at,updated_at",
+                "id": f"eq.{user.id}",
+                "limit": 1,
+            },
+        )
+        self._validate_status(response, allowed={status.HTTP_200_OK})
+        rows = self._parse_rows(response, MemorySettingsRecord)
+        return rows[0] if rows else MemorySettingsRecord()
+
+    async def set_memory_enabled(
+        self,
+        user: AuthenticatedUser,
+        *,
+        enabled: bool,
+    ) -> MemorySettingsRecord:
+        response = await self._request(
+            "POST",
+            "rpc/set_memory_enabled",
+            access_token=user.access_token,
+            json_body={"p_enabled": enabled},
+        )
+        self._validate_status(response, allowed={status.HTTP_200_OK})
+        rows = self._parse_rows(response, MemorySettingsRecord)
+        if len(rows) != 1 or rows[0].memory_enabled is not enabled:
+            raise PersistenceUnavailable(
+                "The memory preference update returned an invalid record."
+            )
+        return rows[0]
+
+    async def get_export_profile(
+        self,
+        user: AuthenticatedUser,
+    ) -> ProfileExportRecord | None:
+        response = await self._request(
+            "GET",
+            "profiles",
+            access_token=user.access_token,
+            params={
+                "select": "display_name,created_at,updated_at",
+                "id": f"eq.{user.id}",
+                "limit": 1,
+            },
+        )
+        self._validate_status(response, allowed={status.HTTP_200_OK})
+        rows = self._parse_rows(response, ProfileExportRecord)
+        return rows[0] if rows else None
+
+    async def list_themes(
+        self,
+        user: AuthenticatedUser,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[ThemeRecord]:
+        response = await self._request(
+            "GET",
+            "themes",
+            access_token=user.access_token,
+            params={
+                "select": "id,title,status,created_at,updated_at",
+                "user_id": f"eq.{user.id}",
+                "order": "created_at.desc,id.desc",
+                "limit": min(max(limit, 1), MAX_MEMORY_RECORDS),
+                "offset": max(offset, 0),
+            },
+        )
+        self._validate_status(response, allowed={status.HTTP_200_OK})
+        return self._parse_rows(response, ThemeRecord)
+
+    @staticmethod
+    def _verify_memory_ownership(
+        records: list[MemoryRecord],
+        user: AuthenticatedUser,
+    ) -> None:
+        if any(record.user_id != user.id for record in records):
+            raise PersistenceConflict(
+                "The memory response crossed its authenticated owner scope."
+            )
+
+    async def list_memories(
+        self,
+        user: AuthenticatedUser,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[MemoryRecord]:
+        response = await self._request(
+            "GET",
+            "memories",
+            access_token=user.access_token,
+            params={
+                "select": MEMORY_SELECT,
+                "user_id": f"eq.{user.id}",
+                "order": "created_at.desc,id.desc",
+                "limit": min(max(limit, 1), MAX_MEMORY_RECORDS),
+                "offset": max(offset, 0),
+            },
+        )
+        self._validate_status(response, allowed={status.HTTP_200_OK})
+        rows = self._parse_rows(response, MemoryRecord)
+        self._verify_memory_ownership(rows, user)
+        return rows
+
+    async def get_memory(
+        self,
+        user: AuthenticatedUser,
+        memory_id: UUID,
+    ) -> MemoryRecord | None:
+        response = await self._request(
+            "GET",
+            "memories",
+            access_token=user.access_token,
+            params={
+                "select": MEMORY_SELECT,
+                "id": f"eq.{memory_id}",
+                "user_id": f"eq.{user.id}",
+                "limit": 1,
+            },
+        )
+        self._validate_status(response, allowed={status.HTTP_200_OK})
+        rows = self._parse_rows(response, MemoryRecord)
+        self._verify_memory_ownership(rows, user)
+        return rows[0] if rows else None
+
+    async def _get_owned_source_message(
+        self,
+        user: AuthenticatedUser,
+        source_message_id: UUID,
+    ) -> MessageRecord | None:
+        response = await self._request(
+            "GET",
+            "messages",
+            access_token=user.access_token,
+            params={
+                "select": PUBLIC_MESSAGE_SELECT,
+                "id": f"eq.{source_message_id}",
+                "role": "eq.user",
+                "limit": 1,
+            },
+        )
+        self._validate_status(response, allowed={status.HTTP_200_OK})
+        rows = self._parse_rows(response, MessageRecord)
+        return rows[0] if rows else None
+
+    async def create_confirmed_memory(
+        self,
+        user: AuthenticatedUser,
+        *,
+        source_message_id: UUID,
+        kind: MemoryKind,
+        content: str,
+        confidence: MemoryConfidence,
+    ) -> MemoryRecord:
+        settings = await self.get_memory_settings(user)
+        if not settings.memory_enabled:
+            raise PersistenceNotAllowed(
+                "Long-term memory has not been explicitly enabled."
+            )
+        source = await self._get_owned_source_message(user, source_message_id)
+        if source is None:
+            raise ResourceNotFound("The source message is unavailable.")
+        if source.content != content:
+            raise PersistenceNotAllowed(
+                "An initial memory must preserve the complete source wording."
+            )
+
+        memory_id = uuid4()
+        now = datetime.now(timezone.utc)
+        response = await self._request(
+            "POST",
+            "memories",
+            access_token=user.access_token,
+            json_body={
+                "id": str(memory_id),
+                "user_id": str(user.id),
+                "lineage_id": str(memory_id),
+                "source_message_id": str(source_message_id),
+                "supersedes_id": None,
+                "kind": kind,
+                "content": content,
+                "original_content": content,
+                "confidence": confidence,
+                "confirmed": True,
+                "status": "active",
+                "version": 1,
+                "version_origin": "source_quote",
+                "confirmed_at": now.isoformat(),
+                "paused_at": None,
+                "superseded_at": None,
+                "created_at": now.isoformat(),
+                "updated_at": now.isoformat(),
+            },
+            return_representation=True,
+        )
+        self._validate_status(
+            response,
+            allowed={status.HTTP_200_OK, status.HTTP_201_CREATED},
+        )
+        rows = self._parse_rows(response, MemoryRecord)
+        self._verify_memory_ownership(rows, user)
+        if (
+            len(rows) != 1
+            or rows[0].id != memory_id
+            or rows[0].lineage_id != memory_id
+            or rows[0].content != content
+            or rows[0].version != 1
+            or rows[0].version_origin != "source_quote"
+        ):
+            raise PersistenceUnavailable(
+                "The confirmed memory write returned an invalid record."
+            )
+        return rows[0]
+
+    async def revise_memory(
+        self,
+        user: AuthenticatedUser,
+        *,
+        memory_id: UUID,
+        expected_version: int,
+        content: str,
+    ) -> MemoryRecord | None:
+        current = await self.get_memory(user, memory_id)
+        if current is None:
+            return None
+        if current.status == "superseded" or current.version != expected_version:
+            raise PersistenceConflict(
+                "The memory changed before this revision was confirmed."
+            )
+        response = await self._request(
+            "POST",
+            "rpc/revise_memory",
+            access_token=user.access_token,
+            json_body={
+                "p_memory_id": str(memory_id),
+                "p_expected_version": expected_version,
+                "p_content": content,
+            },
+        )
+        if response.status_code in {
+            status.HTTP_400_BAD_REQUEST,
+            status.HTTP_409_CONFLICT,
+        }:
+            raise PersistenceConflict(
+                "The memory changed before this revision was confirmed."
+            )
+        self._validate_status(response, allowed={status.HTTP_200_OK})
+        rows = self._parse_rows(response, MemoryRecord)
+        self._verify_memory_ownership(rows, user)
+        if (
+            len(rows) != 1
+            or rows[0].lineage_id != current.lineage_id
+            or rows[0].supersedes_id != current.id
+            or rows[0].version != current.version + 1
+            or rows[0].version_origin != "user_revision"
+            or rows[0].original_content != current.original_content
+            or rows[0].content != content
+        ):
+            raise PersistenceUnavailable(
+                "The memory revision returned an invalid record."
+            )
+        return rows[0]
+
+    async def set_memory_status(
+        self,
+        user: AuthenticatedUser,
+        *,
+        memory_id: UUID,
+        memory_status: Literal["active", "paused"],
+    ) -> MemoryRecord | None:
+        current = await self.get_memory(user, memory_id)
+        if current is None:
+            return None
+        if current.status == "superseded":
+            raise PersistenceConflict("A superseded memory cannot be reactivated.")
+
+        now = datetime.now(timezone.utc)
+        response = await self._request(
+            "PATCH",
+            "memories",
+            access_token=user.access_token,
+            params={
+                "id": f"eq.{memory_id}",
+                "user_id": f"eq.{user.id}",
+                "status": "in.(active,paused)",
+            },
+            json_body={
+                "status": memory_status,
+                "paused_at": now.isoformat() if memory_status == "paused" else None,
+                "updated_at": now.isoformat(),
+            },
+            return_representation=True,
+        )
+        self._validate_status(response, allowed={status.HTTP_200_OK})
+        rows = self._parse_rows(response, MemoryRecord)
+        self._verify_memory_ownership(rows, user)
+        if len(rows) != 1 or rows[0].status != memory_status:
+            raise PersistenceConflict("The memory status changed concurrently.")
+        return rows[0]
+
+    async def delete_memory_lineage(
+        self,
+        user: AuthenticatedUser,
+        lineage_id: UUID,
+    ) -> bool:
+        existing = await self._request(
+            "GET",
+            "memories",
+            access_token=user.access_token,
+            params={
+                "select": MEMORY_SELECT,
+                "lineage_id": f"eq.{lineage_id}",
+                "user_id": f"eq.{user.id}",
+                "limit": MAX_MEMORY_RECORDS,
+            },
+        )
+        self._validate_status(existing, allowed={status.HTTP_200_OK})
+        existing_rows = self._parse_rows(existing, MemoryRecord)
+        self._verify_memory_ownership(existing_rows, user)
+        if not existing_rows:
+            return False
+
+        response = await self._request(
+            "POST",
+            "rpc/delete_memory_lineage",
+            access_token=user.access_token,
+            json_body={"p_lineage_id": str(lineage_id)},
+        )
+        self._validate_status(response, allowed={status.HTTP_200_OK})
+        try:
+            deleted_count = response.json()
+        except ValueError as error:
+            raise PersistenceUnavailable(
+                "The memory deletion returned invalid data."
+            ) from error
+        if not isinstance(deleted_count, int) or isinstance(deleted_count, bool):
+            raise PersistenceUnavailable(
+                "The memory deletion returned invalid data."
+            )
+
+        remaining = await self._request(
+            "GET",
+            "memories",
+            access_token=user.access_token,
+            params={
+                "select": "id",
+                "lineage_id": f"eq.{lineage_id}",
+                "user_id": f"eq.{user.id}",
+                "limit": 1,
+            },
+        )
+        self._validate_status(remaining, allowed={status.HTTP_200_OK})
+        try:
+            remaining_rows = remaining.json()
+        except ValueError as error:
+            raise PersistenceUnavailable(
+                "PAS could not verify the memory deletion."
+            ) from error
+        if not isinstance(remaining_rows, list):
+            raise PersistenceUnavailable(
+                "PAS could not verify the memory deletion."
+            )
+        if remaining_rows:
+            raise PersistenceConflict(
+                "The memory lineage still exists after the deletion request."
+            )
+        return True
+
     async def list_messages(
         self,
         user: AuthenticatedUser,
@@ -799,6 +1234,48 @@ class SupabasePersistence:
             for pair in reversed(newest_pairs)
             for message in pair
         ]
+
+    async def list_export_messages(
+        self,
+        user: AuthenticatedUser,
+        conversation_id: UUID,
+    ) -> list[MessageRecord]:
+        """Export every complete public reviewed pair without silent paging loss."""
+
+        raw_messages: list[MessageRecord] = []
+        while len(raw_messages) < MAX_EXPORT_MESSAGES:
+            response = await self._request(
+                "GET",
+                "messages",
+                access_token=user.access_token,
+                params={
+                    "select": PUBLIC_MESSAGE_SELECT,
+                    "conversation_id": f"eq.{conversation_id}",
+                    "client_turn_id": "not.is.null",
+                    "order": "created_at.desc,role.asc,id.desc",
+                    "limit": MAX_HISTORY_MESSAGES,
+                    "offset": len(raw_messages),
+                },
+            )
+            self._validate_status(response, allowed={status.HTTP_200_OK})
+            batch = self._parse_rows(response, MessageRecord)
+            raw_messages.extend(batch)
+            if len(batch) < MAX_HISTORY_MESSAGES:
+                reviewed = self._complete_public_reviewed_turn_messages(
+                    raw_messages
+                )
+                newest_pairs = [
+                    reviewed[index : index + 2]
+                    for index in range(0, len(reviewed), 2)
+                ]
+                return [
+                    message
+                    for pair in reversed(newest_pairs)
+                    for message in pair
+                ]
+        raise PersistenceUnavailable(
+            "The conversation export is too large to complete safely."
+        )
 
     async def list_context_messages(
         self,
@@ -1064,6 +1541,101 @@ class SupabasePersistence:
 
             await cleanup_created_conversation()
             raise
+
+    async def _account_active_data_is_absent(
+        self,
+        user_id: UUID,
+    ) -> bool:
+        """Verify auth and active public rows without reading psychological text."""
+
+        headers = self._secret_headers()
+        try:
+            async with httpx.AsyncClient(
+                timeout=PERSISTENCE_REQUEST_TIMEOUT_SECONDS,
+                transport=self._transport,
+            ) as client:
+                auth_response = await client.get(
+                    f"{self._supabase_url}/auth/v1/admin/users/{user_id}",
+                    headers=headers,
+                )
+                if auth_response.status_code == status.HTTP_200_OK:
+                    return False
+                if auth_response.status_code != status.HTTP_404_NOT_FOUND:
+                    raise PersistenceUnavailable(
+                        "PAS could not verify the deleted auth account."
+                    )
+
+                resources = (
+                    ("profiles", "id"),
+                    ("conversations", "user_id"),
+                    ("messages", "user_id"),
+                    ("memories", "user_id"),
+                    ("themes", "user_id"),
+                )
+                for resource, owner_column in resources:
+                    response = await client.get(
+                        f"{self._supabase_url}/rest/v1/{resource}",
+                        headers=headers,
+                        params={
+                            "select": "id",
+                            owner_column: f"eq.{user_id}",
+                            "limit": 1,
+                        },
+                    )
+                    if response.status_code != status.HTTP_200_OK:
+                        raise PersistenceUnavailable(
+                            "PAS could not verify active account data deletion."
+                        )
+                    try:
+                        payload = response.json()
+                    except ValueError as error:
+                        raise PersistenceUnavailable(
+                            "PAS received an invalid deletion verification result."
+                        ) from error
+                    if not isinstance(payload, list):
+                        raise PersistenceUnavailable(
+                            "PAS received an invalid deletion verification result."
+                        )
+                    if payload:
+                        return False
+        except httpx.RequestError as error:
+            raise PersistenceUnavailable(
+                "PAS could not verify active account data deletion."
+            ) from error
+        return True
+
+    async def delete_account(self, user: AuthenticatedUser) -> None:
+        """Permanently delete the auth user, then verify active rows are gone."""
+
+        headers = self._secret_headers()
+        try:
+            async with httpx.AsyncClient(
+                timeout=PERSISTENCE_REQUEST_TIMEOUT_SECONDS,
+                transport=self._transport,
+            ) as client:
+                response = await client.request(
+                    "DELETE",
+                    f"{self._supabase_url}/auth/v1/admin/users/{user.id}",
+                    headers=headers,
+                    json={"should_soft_delete": False},
+                )
+        except httpx.RequestError:
+            if await self._account_active_data_is_absent(user.id):
+                return
+            raise PersistenceUnavailable(
+                "PAS could not confirm whether the account was deleted."
+            ) from None
+
+        if response.status_code not in {
+            status.HTTP_200_OK,
+            status.HTTP_204_NO_CONTENT,
+            status.HTTP_404_NOT_FOUND,
+        }:
+            raise PersistenceUnavailable("Supabase rejected the account deletion.")
+        if not await self._account_active_data_is_absent(user.id):
+            raise PersistenceUnavailable(
+                "PAS could not verify that active account data was deleted."
+            )
 
 
 def get_persistence(

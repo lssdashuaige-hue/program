@@ -283,6 +283,7 @@ class MultiAgentOrchestrator:
         run_state: PipelineRunState | None = None,
         conversation_history: Sequence[ConversationContextMessage] = (),
         response_preference: ResponsePreference | None = None,
+        allow_memory: bool = True,
     ) -> AgentResult:
         preflight_result = preflight_safety_result(user_message)
         if preflight_result is not None:
@@ -634,6 +635,7 @@ class MultiAgentOrchestrator:
         memory_candidate = None
         if (
             self._memory_agent is not None
+            and allow_memory
             and decision.risk_level == "none"
             and bounded_candidate is None
             and not memory_opt_out_requested(user_message)

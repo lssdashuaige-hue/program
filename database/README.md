@@ -31,9 +31,24 @@ columns. Legacy pairs and historical Review v2 / Verifier v1 pairs remain
 visible in history, but only `2`/`2` pairs are eligible for model context or
 current idempotent replay.
 
+`0007_user_data_control.sql` is also local-only and has not been applied. It
+implements the PAS-027 active-database control contract: long-term memory
+defaults to off, initial memories must exactly match an owned user message,
+edits create an owner-confirmed version instead of overwriting the source,
+and pause/delete operations are owner-scoped. Direct content updates and
+partial version deletion are revoked; the narrow revision and lineage-delete
+functions verify `auth.uid()` and the backend first performs an RLS-scoped
+ownership read. This migration must follow `0006` and must not be deployed
+until the migration ledger, verified backup, maintenance window, and two-user
+PostgREST isolation test are ready.
+
 The hosted migration ledger starts with the confirmed-memory migration even
 though the initial schema is present. Do not replay `0001_initial_schema.sql`
 against the existing project merely to fill that historical ledger gap.
+
+The current backend and privacy UI select fields introduced by `0006` and
+`0007`. Do not deploy them ahead of the database migrations, and do not run old
+and new backend versions together after the stricter constraints are active.
 
 On 2026-08-14, a live synthetic end-to-end check verified normal reviewed
 pair writes, exact idempotent retry, restored second-turn context, browser
