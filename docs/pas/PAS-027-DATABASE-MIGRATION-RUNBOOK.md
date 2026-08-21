@@ -1,9 +1,12 @@
 # PAS-027 database migration readiness runbook
 
-Status as of 2026-08-21: **GATE_A_PASS**,
-**GATE_B_TECHNICAL_PASS_RELEASE_CONDITIONAL**, and **GATE_C1_PASS**. The
-project is ready to request a separately authorized hosted migration dry-run.
-This is not authorization to apply a hosted migration.
+Status as of 2026-08-22: **GATE_A_PASS**,
+**GATE_B_TECHNICAL_PASS_RELEASE_CONDITIONAL**, **GATE_C1_PASS**, and
+**GATE_C2_FAIL_CLOSED_NOT_PASSED**. Hosted ordinal `20260821-01` stopped at
+the first read-only fingerprint before either migration CLI business command
+ran. The project is not ready for migration apply or deployment. A new hosted
+attempt first requires an offline observability fix, a new frozen identity and
+separate authorization.
 
 ## Frozen local evidence
 
@@ -53,8 +56,9 @@ production locks, or hosted backup recovery.
    operations remain conditional on the final post-freeze backup and named
    RPO/RTO/owners.
 4. **Official-stack CLI replay (Gate C1)** — complete.
-5. **Hosted read-only migration dry-run (Gate C2)** — requires separate
-   authorization.
+5. **Hosted read-only migration dry-run (Gate C2)** — attempted under ordinal
+   `20260821-01`, but failed closed before `migration list` or
+   `db push --dry-run`; not passed and the ordinal is consumed.
 6. **Migration apply authorization** — do not request until all remaining
    operational gates below are complete.
 7. **Post-migration two-user Auth/PostgREST smoke (Gate D)** — required before
@@ -104,6 +108,11 @@ production locks, or hosted backup recovery.
 - [ ] Under the separately authorized hosted preflight, run the supported
       migration dry-run and require that it proposes only the reviewed 0006 and
       0007 files. A dry-run result is evidence, not permission to apply.
+      Attempt `20260821-01` did not reach either migration CLI command because
+      the initial hosted read-only fingerprint process returned non-zero. See
+      `PAS-027-GATE-C2-ATTEMPT-20260821-01-2026-08-22.md`. FAIL_CLOSED proves
+      safe stopping, not Gate C2 completion; zero business-command attempts do
+      not constitute a passing dry-run.
 - [ ] Set bounded `lock_timeout` and `statement_timeout` appropriate to the
       measured hosted sizes.
 - [ ] Enter a maintenance mode that stops durable message and memory writes.
@@ -163,9 +172,13 @@ production locks, or hosted backup recovery.
 
 ## Readiness decision
 
-The current state is suitable for asking for a **separate hosted migration
-dry-run authorization**. It is **not yet suitable for asking for direct
-migration-apply authorization**. That later request still requires the
-operational Gate B/C items: final backup after write freeze, accepted RPO/RTO,
-named recovery/rollback/cutover authorities, bounded timeouts, maintenance
-mode, and a fresh lock/transaction check.
+The current state is **not suitable for asking for migration-apply or deployment
+authorization**. Gate C2 did not pass, and ordinal `20260821-01` must not be
+retried. The next hosted request may only follow an offline, secret-safe
+observability fix, local fixtures, a hosted-free LocalPreflight, independent
+review, and a newly frozen repository/runner/contract/ordinal. It should first
+be a diagnostic-only read-only fingerprint authorization, not a migration
+dry-run. Direct migration authorization also remains blocked by the operational
+Gate B/C items: final backup after write freeze, accepted RPO/RTO, named
+recovery/rollback/cutover authorities, bounded timeouts, maintenance mode, and
+a fresh lock/transaction check.
