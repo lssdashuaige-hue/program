@@ -1,0 +1,20 @@
+# LOCAL CLI MIGRATION MAP ONLY.
+# This file intentionally omits hosted Auth, API, Storage, and network settings.
+# Never run `supabase config push` from this directory; hosted product settings
+# are reviewed and managed separately from database migrations.
+
+project_id = "pas-site-alpha"
+
+[db]
+port = 64332
+shadow_port = 64330
+health_timeout = "2m"
+major_version = 17
+
+[db.migrations]
+enabled = true
+schema_paths = []
+
+[db.seed]
+enabled = false
+sql_paths = []

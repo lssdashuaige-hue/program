@@ -54,6 +54,15 @@ The hosted migration ledger starts with the confirmed-memory migration even
 though the initial schema is present. Do not replay `0001_initial_schema.sql`
 against the existing project merely to fill that historical ledger gap.
 
+The pinned Supabase CLI deployment view is in `../supabase/migrations/`. It
+maps the four existing hosted timestamp versions to `0002`–`0005`, deliberately
+omits the untracked `0001` baseline, and assigns frozen timestamp versions to
+`0006` and `0007`. Run `npm run verify:supabase-map` from `rehearsal/` to prove
+that every deployment file is byte-identical to its canonical source before a
+dry-run. Gate C1's official PostgreSQL 17 / CLI 2.111.0 replay passed on
+2026-08-21; the hosted dry-run and any migration apply still require separate
+authorization.
+
 The current backend and privacy UI select fields introduced by `0006` and
 `0007`. Do not deploy them ahead of the database migrations, and do not run old
 and new backend versions together after the stricter constraints are active.

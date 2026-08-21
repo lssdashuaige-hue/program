@@ -10,6 +10,13 @@ Run it from this directory:
 npm run rehearse
 ```
 
+Also verify the hosted Supabase CLI timestamp mapping without contacting a
+database:
+
+```text
+npm run verify:supabase-map
+```
+
 The command prints one JSON document using the
 `pas-local-database-rehearsal/v1` evidence schema. A zero exit code means every
 required check passed. Any failed or blocked check produces a non-zero exit

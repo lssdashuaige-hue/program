@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "rehearse": "node rehearse.mjs"
+    "rehearse": "node rehearse.mjs",
+    "verify:supabase-map": "node verify-supabase-map.mjs"
   },
   "dependencies": {
     "@electric-sql/pglite": "0.5.5",

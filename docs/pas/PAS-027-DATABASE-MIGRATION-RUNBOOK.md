@@ -1,8 +1,9 @@
 # PAS-027 database migration readiness runbook
 
-Status as of 2026-08-21: **LOCAL_REHEARSAL_CLEAR** and
-**READY_FOR_REMOTE_PREFLIGHT_AUTH**. This is not authorization to apply a
-hosted migration.
+Status as of 2026-08-21: **GATE_A_PASS**,
+**GATE_B_TECHNICAL_PASS_RELEASE_CONDITIONAL**, and **GATE_C1_PASS**. The
+project is ready to request a separately authorized hosted migration dry-run.
+This is not authorization to apply a hosted migration.
 
 ## Frozen local evidence
 
@@ -11,6 +12,10 @@ hosted migration.
   `024217bca725e2f8c76904a03092076672fe15326a96341a2ee19991ae898d33`
 - Migration 0007 SHA-256:
   `d0d0144a6ec77401f11246ef3eef24ed3efc8c6d46c4d87179d5430b7e0268e2`
+- Hosted deployment versions: `20260821094736` for 0006 and
+  `20260821094738` for 0007
+- Pinned Supabase CLI: `2.111.0`
+- Official-stack Gate C1 result: PASS (`20260821T100712Z`)
 - Local engine: PGlite 0.5.5 / PostgreSQL 18.3 WASM
 - Rehearsal result: 13 passed, 0 failed, 0 blocked
 
@@ -42,51 +47,56 @@ production locks, or hosted backup recovery.
 
 ## Authorization stages
 
-1. **Local rehearsal** — complete.
-2. **Read-only hosted preflight** — may now be requested separately.
-3. **Backup creation and independent restore verification** — not yet done.
-4. **Migration apply authorization** — do not request until all gates below are
-   complete.
-5. **Post-migration two-user Auth/PostgREST smoke** — required before normal
-   writes resume.
+1. **PGlite local rehearsal** — complete.
+2. **Read-only hosted preflight (Gate A)** — complete.
+3. **Technical backup and independent restore (Gate B)** — complete; release
+   operations remain conditional on the final post-freeze backup and named
+   RPO/RTO/owners.
+4. **Official-stack CLI replay (Gate C1)** — complete.
+5. **Hosted read-only migration dry-run (Gate C2)** — requires separate
+   authorization.
+6. **Migration apply authorization** — do not request until all remaining
+   operational gates below are complete.
+7. **Post-migration two-user Auth/PostgREST smoke (Gate D)** — required before
+   normal writes resume.
 
 ## Gate A — read-only hosted preflight
 
-- [ ] Record the hosted PostgreSQL/Supabase versions and project health.
-- [ ] Run `database/rehearsal/preflight_before_0006_0007.sql` under read-only
+- [x] Record the hosted PostgreSQL/Supabase versions and project health.
+- [x] Run `database/rehearsal/preflight_before_0006_0007.sql` under read-only
       authorization.
-- [ ] Reconcile the hosted migration ledger with the repository. Do not use
+- [x] Reconcile the hosted migration ledger with the repository. Do not use
       `migration repair` as if it changed schema; it only changes ledger state.
-- [ ] Confirm the hosted schema is exactly at the expected 0005 boundary and
+- [x] Confirm the hosted schema is exactly at the expected 0005 boundary and
       that the 0006/0007 columns are absent.
-- [ ] Require all legacy-memory blocker counts to be zero: unconfirmed,
+- [x] Require all legacy-memory blocker counts to be zero: unconfirmed,
       invalid length, missing/dangling source, cross-user source, non-user
       source, and non-exact source.
-- [ ] Record the number of durable assistant rows that 0006 will mark legacy.
-- [ ] Record table sizes, row counts, long transactions, lock waiters, and the
+- [x] Record the number of durable assistant rows that 0006 will mark legacy.
+- [x] Record table sizes, row counts, long transactions, lock waiters, and the
       existing RLS/grant snapshot.
-- [ ] If any blocker is non-zero, stop. Design a separate reviewed cleanup or
+- [x] If any blocker is non-zero, stop. Design a separate reviewed cleanup or
       user-reconfirmation migration; do not silently mark the text as a quote.
 
 ## Gate B — backup and recovery
 
 - [ ] Stop application writes before taking the final backup.
-- [ ] Create fresh roles, schema, and data logical dumps using the supported
+- [x] Create fresh roles, schema, and data logical dumps using the supported
       Supabase CLI workflow; record hashes and timestamps without recording
       secrets.
-- [ ] Restore those dumps into a disposable PostgreSQL environment and compare
+- [x] Restore those dumps into a disposable PostgreSQL environment and compare
       schema, row counts, ownership, and representative constraints.
 - [ ] Document the accepted RPO, target RTO, restoration owner, and decision
       authority.
 - [ ] Confirm sufficient quota/disk and that backup retention meets the chosen
       rollback window.
-- [ ] Treat the local PGlite restore as rehearsal evidence only; it is not a
+- [x] Treat the local PGlite restore as rehearsal evidence only; it is not a
       verified hosted backup.
 
 ## Gate C — maintenance and apply plan
 
-- [ ] Freeze migration files and recheck both SHA-256 values above.
-- [ ] Pin the exact Supabase CLI version that will perform the migration. Using
+- [x] Freeze migration files and recheck both SHA-256 values above.
+- [x] Pin the exact Supabase CLI version that will perform the migration. Using
       that same version, replay 0001–0007 in a disposable official local stack
       and confirm that the explicit transaction boundaries and migration ledger
       updates behave as expected. PGlite does not exercise the CLI migration
@@ -153,7 +163,9 @@ production locks, or hosted backup recovery.
 
 ## Readiness decision
 
-The current local state is suitable for asking for a **separate read-only hosted
-preflight authorization**. It is **not yet suitable for asking for direct
-migration-apply authorization**. That later request requires Gate A and Gate B
-to be completed with real hosted evidence and a named maintenance/recovery plan.
+The current state is suitable for asking for a **separate hosted migration
+dry-run authorization**. It is **not yet suitable for asking for direct
+migration-apply authorization**. That later request still requires the
+operational Gate B/C items: final backup after write freeze, accepted RPO/RTO,
+named recovery/rollback/cutover authorities, bounded timeouts, maintenance
+mode, and a fresh lock/transaction check.
