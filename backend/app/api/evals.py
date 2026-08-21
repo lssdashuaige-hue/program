@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.ai.orchestrator import MultiAgentOrchestrator
 from app.api.chat import get_orchestrator
+from app.config import Settings, get_settings
 from app.evals.models import (
     EVAL_RUN_TIMEOUT_SECONDS,
     EvalHealthReport,
@@ -14,6 +15,10 @@ from app.evals.models import (
     EvalSuiteMetadata,
 )
 from app.evals.runner import EvalRunner
+from app.evals.report_store import (
+    EvalReportPersistenceError,
+    write_full_suite_report,
+)
 from app.evals.security import require_evals_admin
 from app.evals.suites import get_suite, get_suite_metadata
 
@@ -57,6 +62,7 @@ async def run_evals(
         MultiAgentOrchestrator | None,
         Depends(get_orchestrator),
     ],
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> EvalRunReport:
     if orchestrator is None:
         raise HTTPException(
@@ -103,7 +109,7 @@ async def run_evals(
 
     try:
         try:
-            return await asyncio.wait_for(
+            raw_report = await asyncio.wait_for(
                 EvalRunner(orchestrator).run(
                     cases,
                     suite=request.suite,
@@ -112,6 +118,22 @@ async def run_evals(
                 ),
                 timeout=EVAL_RUN_TIMEOUT_SECONDS,
             )
+            report = EvalRunReport.model_validate(raw_report)
+            if run_scope == "full_suite":
+                try:
+                    write_full_suite_report(
+                        report,
+                        settings.pas_evals_report_dir,
+                    )
+                except EvalReportPersistenceError as exc:
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail=(
+                            "The complete evaluation report could not be "
+                            "safely archived."
+                        ),
+                    ) from exc
+            return report
         except TimeoutError as exc:
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,

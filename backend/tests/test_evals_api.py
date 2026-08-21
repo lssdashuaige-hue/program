@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -25,10 +26,12 @@ from app.evals.models import (
     MAX_EVAL_HISTORY_MESSAGES,
     MAX_EVAL_INPUT_LENGTH,
     EvalCaseSpec,
+    EvalRunReport,
     EvalRunRequest,
     SuiteName,
 )
 from app.evals.runner import EvalRunner
+from app.evals.report_store import EvalReportPersistenceError
 from app.evals.suites import get_suite
 from app.main import app
 from tests.review_fixtures import review_decision, safe_final_checks
@@ -128,13 +131,21 @@ class ReviewContractFailureOrchestrator:
         )
 
 
-def eval_settings(*, enabled: bool = True) -> Settings:
+def eval_settings(
+    *,
+    enabled: bool = True,
+    report_dir: Path | None = None,
+) -> Settings:
+    overrides: dict[str, Any] = {}
+    if report_dir is not None:
+        overrides["pas_evals_report_dir"] = report_dir
     return Settings(
         _env_file=None,
         pas_evals_enabled=enabled,
         pas_evals_admin_token=ADMIN_TOKEN,
         openai_api_key=OPENAI_SECRET,
         deepseek_api_key=DEEPSEEK_SECRET,
+        **overrides,
     )
 
 
@@ -220,8 +231,10 @@ def test_run_requires_a_configured_reviewed_pipeline() -> None:
     assert response.status_code == 503
 
 
-def test_dialogue_suite_dispatches_through_the_internal_api() -> None:
-    authorize(eval_settings(), StaticOrchestrator())
+def test_dialogue_suite_dispatches_and_archives_the_complete_report(
+    tmp_path: Path,
+) -> None:
+    authorize(eval_settings(report_dir=tmp_path), StaticOrchestrator())
 
     response = TestClient(app).post(
         "/internal/evals/run",
@@ -234,6 +247,50 @@ def test_dialogue_suite_dispatches_through_the_internal_api() -> None:
     assert response.json()["run_scope"] == "full_suite"
     assert response.json()["total_suite_case_count"] == MAX_EVAL_CASES
     assert response.json()["case_count"] == MAX_EVAL_CASES
+    archived_paths = list(tmp_path.glob("*.json"))
+    assert len(archived_paths) == 1
+    archived = EvalRunReport.model_validate_json(
+        archived_paths[0].read_text(encoding="utf-8")
+    )
+    assert archived.model_dump(exclude_none=True) == response.json()
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {
+            "suite": "pas-core-v0.1",
+            "case_ids": ["normal_reflection"],
+        },
+        {
+            "cases": [
+                {
+                    "case_id": "explicit_archive_probe",
+                    "category": "pipeline",
+                    "input": "完全合成的非完整运行测试。",
+                }
+            ],
+            "data_classification": "synthetic",
+        },
+    ],
+    ids=["suite_subset", "explicit_cases"],
+)
+def test_non_full_runs_do_not_create_canonical_archives(
+    body: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    authorize(eval_settings(report_dir=tmp_path), StaticOrchestrator())
+
+    response = TestClient(app).post(
+        "/internal/evals/run",
+        headers=auth_headers(),
+        json=body,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["run_scope"] in {"suite_subset", "explicit_cases"}
+    assert not list(tmp_path.iterdir())
 
 
 @pytest.mark.parametrize(
@@ -806,11 +863,12 @@ def test_eval_run_gate_rejects_overlap_without_queueing_and_releases() -> None:
             case_ids=["normal_reflection"],
         )
         blocker = BlockingOrchestrator()
-        first = asyncio.create_task(run_evals(request, None, blocker))
+        settings = eval_settings()
+        first = asyncio.create_task(run_evals(request, None, blocker, settings))
         await asyncio.wait_for(blocker.started.wait(), timeout=1)
 
         with pytest.raises(HTTPException) as conflict:
-            await run_evals(request, None, StaticOrchestrator())
+            await run_evals(request, None, StaticOrchestrator(), settings)
 
         assert conflict.value.status_code == 409
         assert conflict.value.detail == "An evaluation run is already in progress."
@@ -819,7 +877,12 @@ def test_eval_run_gate_rejects_overlap_without_queueing_and_releases() -> None:
         first_report = await first
         assert first_report.run_scope == "suite_subset"
 
-        next_report = await run_evals(request, None, StaticOrchestrator())
+        next_report = await run_evals(
+            request,
+            None,
+            StaticOrchestrator(),
+            settings,
+        )
         assert next_report.case_count == 1
 
     asyncio.run(exercise())
@@ -839,36 +902,104 @@ def test_eval_run_gate_releases_after_unhandled_exception(monkeypatch: Any) -> N
     monkeypatch.setattr(EvalRunner, "run", fail_once)
 
     async def exercise() -> None:
+        settings = eval_settings()
         request = EvalRunRequest(
             suite="pas-core-v0.1",
             case_ids=["normal_reflection"],
         )
         with pytest.raises(RuntimeError, match="synthetic runner failure"):
-            await run_evals(request, None, StaticOrchestrator())
+            await run_evals(request, None, StaticOrchestrator(), settings)
 
-        report = await run_evals(request, None, StaticOrchestrator())
+        report = await run_evals(
+            request,
+            None,
+            StaticOrchestrator(),
+            settings,
+        )
         assert report.case_count == 1
 
     asyncio.run(exercise())
 
 
-def test_eval_run_gate_releases_after_cancellation() -> None:
+def test_full_suite_cancellation_leaves_no_report_and_releases_gate(
+    tmp_path: Path,
+) -> None:
     async def exercise() -> None:
-        request = EvalRunRequest(
-            suite="pas-core-v0.1",
-            case_ids=["normal_reflection"],
-        )
+        settings = eval_settings(report_dir=tmp_path)
+        full_request = EvalRunRequest(suite="pas-core-v0.1")
         blocker = BlockingOrchestrator()
-        cancelled = asyncio.create_task(run_evals(request, None, blocker))
+        cancelled = asyncio.create_task(
+            run_evals(full_request, None, blocker, settings)
+        )
         await asyncio.wait_for(blocker.started.wait(), timeout=1)
         cancelled.cancel()
         with pytest.raises(asyncio.CancelledError):
             await cancelled
+        assert not list(tmp_path.iterdir())
 
-        report = await run_evals(request, None, StaticOrchestrator())
+        subset_request = EvalRunRequest(
+            suite="pas-core-v0.1",
+            case_ids=["normal_reflection"],
+        )
+        report = await run_evals(
+            subset_request,
+            None,
+            StaticOrchestrator(),
+            settings,
+        )
         assert report.case_count == 1
+        assert not list(tmp_path.iterdir())
 
     asyncio.run(exercise())
+
+
+def test_full_suite_archive_failure_is_safe_and_releases_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_report = tmp_path / "existing-complete-report.json"
+    old_report.write_text('{"existing":true}\n', encoding="utf-8")
+
+    def fail_archive(*_args: Any, **_kwargs: Any) -> Path:
+        raise EvalReportPersistenceError(
+            "private path and storage error must not enter the response"
+        )
+
+    monkeypatch.setattr(
+        "app.api.evals.write_full_suite_report",
+        fail_archive,
+    )
+    settings = eval_settings(report_dir=tmp_path)
+    authorize(settings, StaticOrchestrator())
+    client = TestClient(app)
+
+    failed = client.post(
+        "/internal/evals/run",
+        headers=auth_headers(),
+        json={"suite": "pas-core-v0.1"},
+    )
+
+    assert failed.status_code == 500
+    assert failed.json() == {
+        "detail": "The complete evaluation report could not be safely archived."
+    }
+    assert "private path" not in failed.text
+    assert str(tmp_path) not in failed.text
+    assert ADMIN_TOKEN not in failed.text
+    assert OPENAI_SECRET not in failed.text
+    assert DEEPSEEK_SECRET not in failed.text
+    assert old_report.read_text(encoding="utf-8") == '{"existing":true}\n'
+    assert list(tmp_path.iterdir()) == [old_report]
+
+    recovered = client.post(
+        "/internal/evals/run",
+        headers=auth_headers(),
+        json={
+            "suite": "pas-core-v0.1",
+            "case_ids": ["normal_reflection"],
+        },
+    )
+    assert recovered.status_code == 200
 
 
 def test_internal_evals_are_hidden_from_public_openapi() -> None:

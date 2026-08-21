@@ -1,4 +1,5 @@
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic import SecretStr
@@ -30,6 +31,7 @@ class Settings(BaseSettings):
     memory_agent_enabled: bool = False
     pas_evals_enabled: bool = False
     pas_evals_admin_token: SecretStr | None = None
+    pas_evals_report_dir: Path = Path("outputs/evals")
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
