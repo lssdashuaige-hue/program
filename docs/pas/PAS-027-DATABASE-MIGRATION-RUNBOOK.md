@@ -4,9 +4,12 @@ Status as of 2026-08-22: **GATE_A_PASS**,
 **GATE_B_TECHNICAL_PASS_RELEASE_CONDITIONAL**, **GATE_C1_PASS**, and
 **GATE_C2_FAIL_CLOSED_NOT_PASSED**. Hosted ordinal `20260821-01` stopped at
 the first read-only fingerprint before either migration CLI business command
-ran. The project is not ready for migration apply or deployment. A new hosted
-attempt first requires an offline observability fix, a new frozen identity and
-separate authorization.
+ran. The offline observability repair now has a reviewed, protected candidate
+with manifest SHA-256
+`bc92087362e070871bb5b575ad932468868147aca5522fa814c1a3b57b3fff20`.
+No online diagnostic contract or ordinal is installed. The project is not
+ready for migration apply or deployment; the next hosted request may only be a
+separately authorized diagnostic-only fingerprint bound to that manifest.
 
 ## Frozen local evidence
 
@@ -113,6 +116,14 @@ production locks, or hosted backup recovery.
       `PAS-027-GATE-C2-ATTEMPT-20260821-01-2026-08-22.md`. FAIL_CLOSED proves
       safe stopping, not Gate C2 completion; zero business-command attempts do
       not constitute a passing dry-run.
+- [x] Complete the offline, secret-safe diagnostic observability repair; pass
+      source and detached-copy local suites; obtain independent `P0=0`,
+      `P1=0`, `P2=0` review; and freeze candidate manifest
+      `bc92087362e070871bb5b575ad932468868147aca5522fa814c1a3b57b3fff20`.
+      See `PAS-027-GATE-C2-DIAGNOSTIC-PREPARATION-2026-08-22.md`.
+- [ ] Obtain separate explicit authorization for one diagnostic-only ordinal
+      bound to that manifest. Diagnostic success is not the migration dry-run
+      and must not mark this Gate C2 checkbox complete.
 - [ ] Set bounded `lock_timeout` and `statement_timeout` appropriate to the
       measured hosted sizes.
 - [ ] Enter a maintenance mode that stops durable message and memory writes.
@@ -174,11 +185,12 @@ production locks, or hosted backup recovery.
 
 The current state is **not suitable for asking for migration-apply or deployment
 authorization**. Gate C2 did not pass, and ordinal `20260821-01` must not be
-retried. The next hosted request may only follow an offline, secret-safe
-observability fix, local fixtures, a hosted-free LocalPreflight, independent
-review, and a newly frozen repository/runner/contract/ordinal. It should first
-be a diagnostic-only read-only fingerprint authorization, not a migration
-dry-run. Direct migration authorization also remains blocked by the operational
+retried. The offline repair, local fixtures, hosted-free LocalPreflight,
+independent review, and candidate freeze are complete, but no future execution
+contract or diagnostic ordinal exists. The next hosted request should first be
+a diagnostic-only read-only fingerprint authorization bound to the frozen
+candidate, not a migration dry-run. Direct migration authorization also
+remains blocked by the operational
 Gate B/C items: final backup after write freeze, accepted RPO/RTO, named
 recovery/rollback/cutover authorities, bounded timeouts, maintenance mode, and
 a fresh lock/transaction check.
