@@ -13,9 +13,12 @@ and consumed by terminal ordinal `C2D-20260822-01`. The attempt failed closed
 before its first container bootstrap phase and produced no fingerprint. The
 candidate, contract and ordinal must not be reused. See
 `PAS-027-GATE-C2-DIAGNOSTIC-ATTEMPT-C2D-20260822-01-2026-08-22.md`.
-The project is not ready for migration apply or deployment; any later hosted
-request requires a newly frozen successor candidate and a separately explicit
-new ordinal.
+A successor startup-observability candidate has now been frozen offline as
+`C2D-CANDIDATE-20260822-02`, with manifest SHA-256
+`84c9390440ddc60adc9f3c37972cdb64e0f17ee26c3434036cb257af567592dd`.
+It has no execution contract or online ordinal. The project is not ready for
+migration apply or deployment; any later hosted request must separately and
+explicitly bind this new manifest to a fresh ordinal.
 
 ## Frozen local evidence
 
@@ -130,9 +133,12 @@ production locks, or hosted backup recovery.
 - [x] Obtain and execute the separately authorized diagnostic-only ordinal
       `C2D-20260822-01` bound to that manifest. It ended `FAIL_CLOSED` without a
       fingerprint, consumed the ordinal and did not complete Gate C2.
-- [ ] Complete and freeze a new startup-observability candidate. Any later
-      diagnostic authorization must cite that new manifest and a fresh ordinal;
-      it must not reuse the predecessor manifest or contract.
+- [x] Complete and freeze successor candidate `C2D-CANDIDATE-20260822-02`
+      (`84c9390440ddc60adc9f3c37972cdb64e0f17ee26c3434036cb257af567592dd`).
+      It remains `FROZEN_NOT_AUTHORIZED`, with no contract or ordinal.
+- [ ] If another diagnostic is needed, obtain separate explicit authorization
+      binding that manifest to a fresh ordinal. Do not reuse the predecessor
+      manifest, contract or ordinal.
 - [ ] Set bounded `lock_timeout` and `statement_timeout` appropriate to the
       measured hosted sizes.
 - [ ] Enter a maintenance mode that stops durable message and memory writes.
@@ -196,11 +202,13 @@ The current state is **not suitable for asking for migration-apply or deployment
 authorization**. Gate C2 did not pass; ordinals `20260821-01` and
 `C2D-20260822-01` must not be retried. The first diagnostic candidate, its
 contract and its ordinal are terminal predecessor evidence, not a future
-execution target. A later hosted request is permissible only after a new
-candidate is frozen without a contract and the request explicitly binds that
-new manifest to a fresh diagnostic ordinal. It must still be a diagnostic-only
-read-only fingerprint, not a migration dry-run. Direct migration authorization
-also remains blocked by the operational
+execution target. Successor candidate `C2D-CANDIDATE-20260822-02` is frozen
+without a contract, but that does not itself authorize hosted contact. A later
+request is permissible only if it explicitly binds manifest
+`84c9390440ddc60adc9f3c37972cdb64e0f17ee26c3434036cb257af567592dd`
+to a fresh diagnostic ordinal. It must still be a diagnostic-only read-only
+fingerprint, not a migration dry-run. Direct migration authorization also
+remains blocked by the operational
 Gate B/C items: final backup after write freeze, accepted RPO/RTO, named
 recovery/rollback/cutover authorities, bounded timeouts, maintenance mode, and
 a fresh lock/transaction check.

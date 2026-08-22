@@ -82,5 +82,11 @@ predecessor evidence and must remain immutable. Any successor must first:
 4. freeze a new candidate manifest with no execution contract installed; and
 5. receive a fresh, separately explicit ordinal authorization.
 
+Steps 1–4 were later completed offline by successor
+`C2D-CANDIDATE-20260822-02`, manifest SHA-256
+`84c9390440ddc60adc9f3c37972cdb64e0f17ee26c3434036cb257af567592dd`.
+That successor remains `FROZEN_NOT_AUTHORIZED`: step 5 has not occurred, and no
+new execution contract or ordinal is installed.
+
 Even a later successful diagnostic would not itself complete Gate C2 or
 authorize migration or deployment.
