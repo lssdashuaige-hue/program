@@ -85,8 +85,11 @@ predecessor evidence and must remain immutable. Any successor must first:
 Steps 1–4 were later completed offline by successor
 `C2D-CANDIDATE-20260822-02`, manifest SHA-256
 `84c9390440ddc60adc9f3c37972cdb64e0f17ee26c3434036cb257af567592dd`.
-That successor remains `FROZEN_NOT_AUTHORIZED`: step 5 has not occurred, and no
-new execution contract or ordinal is installed.
+That successor was subsequently bound to a new one-shot contract and executed
+once as ordinal `C2D-20260822-02`. It also ended `FAIL_CLOSED`, this time in the
+safe category `TLS_CA`, before a server connection or fingerprint. Its terminal
+record is
+`PAS-027-GATE-C2-DIAGNOSTIC-ATTEMPT-C2D-20260822-02-2026-08-22.md`.
 
 Even a later successful diagnostic would not itself complete Gate C2 or
 authorize migration or deployment.

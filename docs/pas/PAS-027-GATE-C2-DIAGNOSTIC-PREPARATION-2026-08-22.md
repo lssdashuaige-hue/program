@@ -5,7 +5,10 @@
 > `C2D-20260822-01`, executed once and ended `FAIL_CLOSED` without a
 > fingerprint. The candidate, contract and ordinal are consumed and must not be
 > reused. The authoritative terminal record is
-> `PAS-027-GATE-C2-DIAGNOSTIC-ATTEMPT-C2D-20260822-01-2026-08-22.md`.
+> `PAS-027-GATE-C2-DIAGNOSTIC-ATTEMPT-C2D-20260822-01-2026-08-22.md`. Its
+> successor was later executed once as `C2D-20260822-02` and also ended
+> `FAIL_CLOSED`; see
+> `PAS-027-GATE-C2-DIAGNOSTIC-ATTEMPT-C2D-20260822-02-2026-08-22.md`.
 
 ## Decision
 
@@ -94,9 +97,11 @@ rechecked and remain unchanged. Its FAIL_CLOSED result remains authoritative.
 
 The authorization contemplated by this snapshot was subsequently issued for
 ordinal `C2D-20260822-01` and is now terminal. No future request may bind the
-manifest above or reuse its execution contract. A later request is possible
-only after a new candidate is independently reviewed and frozen without a
-contract; it must cite the new manifest hash and a fresh ordinal explicitly.
+manifest above or reuse its execution contract. The later successor candidate
+and ordinal `C2D-20260822-02` are also terminal after a `TLS_CA` failure. A
+future request is possible only after another candidate is independently
+reviewed and frozen without a contract; it must cite the new manifest hash and
+a fresh ordinal explicitly.
 
 Even a later successful diagnostic would not be Gate C2 PASS. Migration and
 deployment remain blocked.
