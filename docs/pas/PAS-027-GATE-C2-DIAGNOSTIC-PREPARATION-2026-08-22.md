@@ -1,5 +1,12 @@
 # PAS-027 Gate C2 diagnostic preparation — 2026-08-22
 
+> **Historical preparation snapshot — superseded.** Candidate
+> `C2D-CANDIDATE-20260822-01` was later bound to ordinal
+> `C2D-20260822-01`, executed once and ended `FAIL_CLOSED` without a
+> fingerprint. The candidate, contract and ordinal are consumed and must not be
+> reused. The authoritative terminal record is
+> `PAS-027-GATE-C2-DIAGNOSTIC-ATTEMPT-C2D-20260822-01-2026-08-22.md`.
+
 ## Decision
 
 **STATIC_GO_CANDIDATE_ONLY / NOT_AUTHORIZED / GATE_C2_NOT_PASSED**
@@ -77,21 +84,19 @@ fingerprint that any later one-shot contract must bind.
 - Frozen components and byte lengths match the candidate manifest: true
 - Protected candidate paths verified: `10`
 - Partial evidence files: `0`
-- Future execution contract present: `false`
-- Online diagnostic freeze present: `false`
+- Future execution contract present at preparation freeze: `false`
+- Online diagnostic freeze present at preparation freeze: `false`
 
 The terminal `20260821-01` runner, contract, freeze, and result hashes were
 rechecked and remain unchanged. Its FAIL_CLOSED result remains authoritative.
 
-## Required next authorization
+## Terminal disposition
 
-The next request may authorize only one diagnostic-only read-only fingerprint
-bound to candidate manifest
-`bc92087362e070871bb5b575ad932468868147aca5522fa814c1a3b57b3fff20`
-and a fresh `C2D-YYYYMMDD-NN` ordinal. The resulting contract must retain one
-process, one connection, zero retries, zero follow-up queries, and zero raw
-output persistence.
+The authorization contemplated by this snapshot was subsequently issued for
+ordinal `C2D-20260822-01` and is now terminal. No future request may bind the
+manifest above or reuse its execution contract. A later request is possible
+only after a new candidate is independently reviewed and frozen without a
+contract; it must cite the new manifest hash and a fresh ordinal explicitly.
 
-Even a successful diagnostic is not Gate C2 PASS. Its result may only inform a
-later, separately frozen and separately authorized complete Gate C2 dry-run.
-Migration and deployment remain blocked.
+Even a later successful diagnostic would not be Gate C2 PASS. Migration and
+deployment remain blocked.
