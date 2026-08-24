@@ -6,13 +6,55 @@ from datetime import UTC, datetime
 from hashlib import sha256
 import os
 from pathlib import Path
+from typing import Literal, cast
 from uuid import uuid4
 
 from app.evals.models import EvalRunReport, contains_obvious_secret
 
 
+EvalReportPersistenceReason = Literal[
+    "report_validation_failed",
+    "directory_prepare_failed",
+    "temporary_file_open_failed",
+    "temporary_file_write_failed",
+    "temporary_file_sync_failed",
+    "report_publish_failed",
+    "report_persistence_failed",
+]
+
+_PERSISTENCE_REASONS = frozenset(
+    {
+        "report_validation_failed",
+        "directory_prepare_failed",
+        "temporary_file_open_failed",
+        "temporary_file_write_failed",
+        "temporary_file_sync_failed",
+        "report_publish_failed",
+        "report_persistence_failed",
+    }
+)
+
+_PUBLIC_PERSISTENCE_MESSAGE = (
+    "The complete evaluation report could not be safely archived."
+)
+
+
 class EvalReportPersistenceError(RuntimeError):
-    """A complete evaluation report could not be safely archived."""
+    """A fixed, non-sensitive failure from the atomic report store."""
+
+    def __init__(self, reason_code: object) -> None:
+        super().__init__(_PUBLIC_PERSISTENCE_MESSAGE)
+        self.reason_code = safe_report_persistence_reason(reason_code)
+
+
+def safe_report_persistence_reason(
+    value: object,
+) -> EvalReportPersistenceReason:
+    """Return only a fixed public reason code, even for injected exceptions."""
+
+    if isinstance(value, str) and value in _PERSISTENCE_REASONS:
+        return cast(EvalReportPersistenceReason, value)
+    return "report_persistence_failed"
 
 
 def _sync_directory_best_effort(directory: Path) -> None:
@@ -31,7 +73,11 @@ def _sync_directory_best_effort(directory: Path) -> None:
         # Windows and some filesystems do not support fsync on directories.
         pass
     finally:
-        os.close(descriptor)
+        try:
+            os.close(descriptor)
+        except OSError:
+            # Publication is already complete; directory sync is best-effort.
+            pass
 
 
 def write_full_suite_report(
@@ -46,6 +92,7 @@ def write_full_suite_report(
     """
 
     temporary_path: Path | None = None
+    reason_code: EvalReportPersistenceReason = "report_validation_failed"
     try:
         validated = EvalRunReport.model_validate(report.model_dump(mode="python"))
         if validated.run_scope != "full_suite" or validated.suite is None:
@@ -60,6 +107,7 @@ def write_full_suite_report(
         payload = f"{serialized}\n".encode("utf-8")
         payload_digest = sha256(payload).hexdigest()
         directory = Path(output_dir).expanduser()
+        reason_code = "directory_prepare_failed"
         directory.mkdir(parents=True, exist_ok=True)
 
         timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ")
@@ -68,26 +116,38 @@ def write_full_suite_report(
             f"pas-full-suite-{validated.suite}-{timestamp}-"
             f"{payload_digest[:16]}-{unique_suffix}.json"
         )
-        temporary_path = directory / f".{final_path.name}.{uuid4().hex}.tmp"
+        # Keep the temporary name independent from the descriptive final name.
+        # Repeating the final name here can cross the legacy Windows MAX_PATH
+        # boundary even when the published report path itself is valid.
+        temporary_path = directory / f".pas-eval-{uuid4().hex}.tmp"
 
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         if hasattr(os, "O_BINARY"):
             flags |= os.O_BINARY
+        reason_code = "temporary_file_open_failed"
         descriptor = os.open(temporary_path, flags, 0o600)
         try:
             handle = os.fdopen(descriptor, "wb")
         except BaseException:
-            os.close(descriptor)
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
             raise
+        reason_code = "temporary_file_write_failed"
         try:
             with handle:
-                handle.write(payload)
+                bytes_written = handle.write(payload)
+                if bytes_written != len(payload):
+                    raise OSError("incomplete report write")
+                reason_code = "temporary_file_sync_failed"
                 handle.flush()
                 os.fsync(handle.fileno())
         except BaseException:
             raise
 
         # The destination name is unique, so previous reports are never replaced.
+        reason_code = "report_publish_failed"
         os.replace(temporary_path, final_path)
         temporary_path = None
         _sync_directory_best_effort(directory)
@@ -99,7 +159,5 @@ def write_full_suite_report(
             except OSError:
                 pass
         if isinstance(exc, Exception):
-            raise EvalReportPersistenceError(
-                "The complete evaluation report could not be safely archived."
-            ) from None
+            raise EvalReportPersistenceError(reason_code) from None
         raise

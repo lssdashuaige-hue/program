@@ -17,6 +17,7 @@ from app.evals.models import (
 from app.evals.runner import EvalRunner
 from app.evals.report_store import (
     EvalReportPersistenceError,
+    safe_report_persistence_reason,
     write_full_suite_report,
 )
 from app.evals.security import require_evals_admin
@@ -132,6 +133,11 @@ async def run_evals(
                             "The complete evaluation report could not be "
                             "safely archived."
                         ),
+                        headers={
+                            "X-PAS-Eval-Archive-Reason": (
+                                safe_report_persistence_reason(exc.reason_code)
+                            )
+                        },
                     ) from exc
             return report
         except TimeoutError as exc:

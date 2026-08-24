@@ -983,6 +983,9 @@ def test_full_suite_archive_failure_is_safe_and_releases_gate(
     assert failed.json() == {
         "detail": "The complete evaluation report could not be safely archived."
     }
+    assert failed.headers["X-PAS-Eval-Archive-Reason"] == (
+        "report_persistence_failed"
+    )
     assert "private path" not in failed.text
     assert str(tmp_path) not in failed.text
     assert ADMIN_TOKEN not in failed.text
